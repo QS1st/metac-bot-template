@@ -44,6 +44,96 @@ from forecasting_tools import (
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# PHASE 1 CONFIGURATION  —  all tunables live here, nowhere else.
+#
+# Evidence grades below refer to Metaculus, "AI Forecasting in 2026: What 11
+# Analyses Say" (8 Jul 2026), which synthesises 11 analyses plus the Fall 2025
+# survey of 39 bot makers (29 prize winners, 10 non-winners).
+# =============================================================================
+
+# Binary prediction caps. MODERATE evidence, and the strongest single
+# differentiator measured among winners (r = +0.48, p = 0.005). 38% of Fall
+# 2025 winners cap; 47% of the top fifteen do, against 29% of the bottom half.
+BINARY_FLOOR = 0.02
+BINARY_CEILING = 0.98
+
+# Number of independent forecasts aggregated per question. STRONG evidence for
+# ensembling (86% of winners aggregate). Phase 2 will widen this across model
+# families; for now it is repeated sampling of one frontier model, which is
+# what the template does and what we are testing against.
+PREDICTIONS_PER_REPORT = 5
+RESEARCH_REPORTS_PER_QUESTION = 1
+
+# -----------------------------------------------------------------------------
+# MODELS
+#
+# The template ships with no llms= block, so forecasting-tools picks defaults.
+# One of those defaults is openai/gpt-4o-search-preview, which OpenRouter does
+# not serve — it 404s on every question. So we name every model explicitly.
+#
+# All IDs below were verified against https://openrouter.ai/api/v1/models on
+# 29 Aug 2026. OpenRouter's free tier rotates with little notice, so if the bot
+# starts returning "No endpoints found", re-check that endpoint first.
+# -----------------------------------------------------------------------------
+
+# True  = free models, zero balance, for testing that the plumbing works.
+# False = frontier models, billed per use. Flip this when credits arrive.
+USE_FREE_MODELS = True
+
+# Free tier. Not frontier, not competitive — these exist to prove the bot can
+# read a question, form a forecast and post it. "no_research" skips the search
+# step entirely, which removes a dependency we don't need while smoke-testing.
+FREE_MODELS = {
+    "default": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "summarizer": "openrouter/google/gemma-4-31b-it:free",
+    "parser": "openrouter/google/gemma-4-31b-it:free",
+    "researcher": "no_research",
+}
+
+# Season tier. claude-fable-5 is the default because it currently sits top of
+# Metaculus's own FutureEval model leaderboard (13.23, ahead of Claude Opus 4.8
+# on 13.06 and GPT-5.5 Instant on 12.81). Phase 2 will spread the ensemble
+# across families for decorrelation — see ENSEMBLE_MODELS below.
+SEASON_MODELS = {
+    "default": "openrouter/anthropic/claude-fable-5",
+    "summarizer": "openrouter/google/gemini-3.7-flash",
+    "parser": "openrouter/google/gemini-3.7-flash",
+    "researcher": "no_research",  # replaced in Phase 2 by real search providers
+}
+
+# Phase 2 ensemble members, kept here so the intent is recorded even though
+# nothing reads this yet. Chosen across four families deliberately: the
+# published research says decorrelation is what makes an ensemble worth having.
+ENSEMBLE_MODELS = [
+    "openrouter/anthropic/claude-fable-5",
+    "openrouter/openai/gpt-5.5",
+    "openrouter/google/gemini-3.1-pro-preview",
+    "openrouter/x-ai/grok-4.6",
+]
+
+
+def build_llm_config():
+    """Return the llms= mapping for the bot, per USE_FREE_MODELS."""
+    chosen = FREE_MODELS if USE_FREE_MODELS else SEASON_MODELS
+    logger.info(
+        "Model tier: %s (default=%s)",
+        "FREE" if USE_FREE_MODELS else "SEASON",
+        chosen["default"],
+    )
+    return {
+        "default": GeneralLlm(
+            model=chosen["default"],
+            temperature=0.3,
+            timeout=90,
+            allowed_tries=3,
+        ),
+        "summarizer": chosen["summarizer"],
+        "parser": chosen["parser"],
+        "researcher": chosen["researcher"],
+    }
+
+
 
 class SummerTemplateBot2026(ForecastBot):
     """
@@ -208,11 +298,20 @@ class SummerTemplateBot2026(ForecastBot):
 
             Today is {datetime.now().strftime("%Y-%m-%d")}.
 
+            This question is STILL OPEN and has NOT yet resolved. If your research
+            appears to show the outcome is already settled, treat that as a warning
+            sign rather than a conclusion: re-read the resolution criteria and the
+            resolution date, and check whether the reported event actually satisfies
+            them. Reporting that resembles the outcome is not the same as the outcome.
+
             Before answering you write:
             (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A brief description of a scenario that results in a No outcome.
-            (d) A brief description of a scenario that results in a Yes outcome.
+            (b) The base rate: how often outcomes of this general kind occur over a
+                comparable period. State the reference class you are using and the
+                numbers behind it, then treat that rate as your starting anchor.
+            (c) The status quo outcome if nothing changed.
+            (d) A brief description of a scenario that results in a No outcome.
+            (e) A brief description of a scenario that results in a Yes outcome.
 
             You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.
             {self._get_conditional_disclaimer_if_necessary(question)}
@@ -236,7 +335,7 @@ class SummerTemplateBot2026(ForecastBot):
             model=self.get_llm("parser", "llm"),
             num_validation_samples=self._structure_output_validation_samples,
         )
-        decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+        decimal_pred = max(BINARY_FLOOR, min(BINARY_CEILING, binary_prediction.prediction_in_decimal))
 
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {decimal_pred}."
@@ -407,6 +506,7 @@ class SummerTemplateBot2026(ForecastBot):
             additional_instructions=parsing_instructions,
             num_validation_samples=self._structure_output_validation_samples,
         )
+        percentile_list = _sorted_percentiles(percentile_list)
         prediction = NumericDistribution.from_question(percentile_list, question)
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
@@ -646,6 +746,29 @@ class SummerTemplateBot2026(ForecastBot):
         )
 
 
+def _sorted_percentiles(percentile_list):
+    """Return percentiles sorted by declared percentile, values forced monotonic.
+
+    The Summer template prompts the model to emit percentile values in
+    ascending order, but prompting is not a guarantee. A non-monotonic
+    distribution is a silent corruption, so we repair it and log loudly.
+    """
+    ordered = sorted(percentile_list, key=lambda p: p.percentile)
+    repaired = False
+    running_max = None
+    for entry in ordered:
+        if running_max is not None and entry.value < running_max:
+            entry.value = running_max
+            repaired = True
+        running_max = entry.value
+    if repaired:
+        logger.warning(
+            "Numeric percentiles arrived non-monotonic and were repaired. "
+            "Check the raw reasoning for this question."
+        )
+    return ordered
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -678,17 +801,7 @@ if __name__ == "__main__":
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o",
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        llms=build_llm_config(),
     )
 
     # Per-mode tournament URL shown in the summary banner footer. These
