@@ -60,9 +60,13 @@ BINARY_CEILING = 0.98
 
 # Number of independent forecasts aggregated per question. STRONG evidence for
 # ensembling (86% of winners aggregate). Phase 2 will widen this across model
-# families; for now it is repeated sampling of one frontier model, which is
-# what the template does and what we are testing against.
-PREDICTIONS_PER_REPORT = 5
+# families; for now it is repeated sampling of one model.
+#
+# On the free tier this is forced to 1. Free models are served from a shared
+# upstream pool and rate-limit hard (a 429 killed our second test run); five
+# predictions per question means five forecast calls plus five parse calls,
+# which trips the limit within a couple of questions. One prediction is enough
+# to prove the plumbing, which is all the free tier is for.
 RESEARCH_REPORTS_PER_QUESTION = 1
 
 # -----------------------------------------------------------------------------
@@ -84,10 +88,14 @@ USE_FREE_MODELS = True
 # Free tier. Not frontier, not competitive — these exist to prove the bot can
 # read a question, form a forecast and post it. "no_research" skips the search
 # step entirely, which removes a dependency we don't need while smoke-testing.
+# Parser and summarizer deliberately sit on a DIFFERENT upstream provider from
+# the default model. Our second test run died on a 429 from Google AI Studio's
+# shared free pool, and putting every call through one provider makes that a
+# single point of failure.
 FREE_MODELS = {
     "default": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-    "summarizer": "openrouter/google/gemma-4-31b-it:free",
-    "parser": "openrouter/google/gemma-4-31b-it:free",
+    "summarizer": "openrouter/minimax/minimax-m3:free",
+    "parser": "openrouter/minimax/minimax-m3:free",
     "researcher": "no_research",
 }
 
@@ -113,20 +121,29 @@ ENSEMBLE_MODELS = [
 ]
 
 
+def predictions_per_report():
+    """Free tier gets 1; the season gets the full ensemble. See note above."""
+    return 1 if USE_FREE_MODELS else 5
+
+
 def build_llm_config():
     """Return the llms= mapping for the bot, per USE_FREE_MODELS."""
     chosen = FREE_MODELS if USE_FREE_MODELS else SEASON_MODELS
     logger.info(
-        "Model tier: %s (default=%s)",
+        "Model tier: %s | default=%s | predictions/question=%d",
         "FREE" if USE_FREE_MODELS else "SEASON",
         chosen["default"],
+        predictions_per_report(),
     )
     return {
+        # allowed_tries is deliberately generous on the free tier: upstream
+        # 429s there are transient and shared-pool, so retrying is the correct
+        # response rather than failing the run.
         "default": GeneralLlm(
             model=chosen["default"],
             temperature=0.3,
-            timeout=90,
-            allowed_tries=3,
+            timeout=120,
+            allowed_tries=6 if USE_FREE_MODELS else 3,
         ),
         "summarizer": chosen["summarizer"],
         "parser": chosen["parser"],
@@ -803,6 +820,7 @@ if __name__ == "__main__":
         extra_metadata_in_explanation=True,
         llms=build_llm_config(),
     )
+    template_bot.predictions_per_research_report = predictions_per_report()
 
     # Per-mode tournament URL shown in the summary banner footer. These
     # piggyback on the forecasting_tools SDK constants and need updating
