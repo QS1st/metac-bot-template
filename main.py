@@ -45,30 +45,38 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 # --- PRIZE-ELIGIBILITY PATCH: make reasoning comments public ----------------
-# See the long note in patch_phase1.py. Upstream posts is_private=True.
-import requests as _requests  # noqa: E402
-from forecasting_tools.forecast_helpers.metaculus_api import (  # noqa: E402
-    MetaculusApi as _MetaculusApi,
+# Upstream's post_question_comment defaults is_private=True, which leaves
+# nothing visible under the question. See the long note in patch_phase1.py.
+#
+# The report classes call MetaculusClient, NOT MetaculusApi (MetaculusApi is a
+# thin delegating wrapper). Patching MetaculusApi compiles, runs, and silently
+# does nothing — verified against the library source, 30 Aug 2026.
+#
+# If this import ever breaks, the run FAILS LOUDLY here. That is deliberate:
+# a bot that forecasts without commenting wins nothing, and a noisy failure is
+# far cheaper than a silent one.
+from forecasting_tools.helpers.metaculus_client import (  # noqa: E402
+    MetaculusClient as _MetaculusClient,
 )
 
+_original_post_question_comment = _MetaculusClient.post_question_comment
 
-def _post_public_question_comment(post_id: int, comment_text: str) -> None:
-    """Post the bot's reasoning as a PUBLIC comment, as the rules require."""
-    response = _requests.post(
-        f"{_MetaculusApi.API_BASE_URL}/comments/create/",
-        json={
-            "on_post": post_id,
-            "text": comment_text,
-            "is_private": False,
-            "included_forecast": True,
-        },
-        **_MetaculusApi._get_auth_headers(),  # type: ignore[arg-type]
+
+def _public_post_question_comment(
+    self,
+    post_id: int,
+    comment_text: str,
+    is_private: bool = True,
+    included_forecast: bool = True,
+) -> None:
+    """Force the reasoning comment public, whatever the caller asked for."""
+    return _original_post_question_comment(
+        self, post_id, comment_text, False, included_forecast
     )
-    response.raise_for_status()
-    logger.info("Posted PUBLIC comment on post %s", post_id)
 
 
-_MetaculusApi.post_question_comment = staticmethod(_post_public_question_comment)
+_MetaculusClient.post_question_comment = _public_post_question_comment
+logger.info("Prize-eligibility patch applied: comments will be posted PUBLICLY.")
 # --- end prize-eligibility patch -------------------------------------------
 
 # =============================================================================
