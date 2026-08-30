@@ -44,41 +44,6 @@ from forecasting_tools import (
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-# --- PRIZE-ELIGIBILITY PATCH: make reasoning comments public ----------------
-# Upstream's post_question_comment defaults is_private=True, which leaves
-# nothing visible under the question. See the long note in patch_phase1.py.
-#
-# The report classes call MetaculusClient, NOT MetaculusApi (MetaculusApi is a
-# thin delegating wrapper). Patching MetaculusApi compiles, runs, and silently
-# does nothing — verified against the library source, 30 Aug 2026.
-#
-# If this import ever breaks, the run FAILS LOUDLY here. That is deliberate:
-# a bot that forecasts without commenting wins nothing, and a noisy failure is
-# far cheaper than a silent one.
-from forecasting_tools.helpers.metaculus_client import (  # noqa: E402
-    MetaculusClient as _MetaculusClient,
-)
-
-_original_post_question_comment = _MetaculusClient.post_question_comment
-
-
-def _public_post_question_comment(
-    self,
-    post_id: int,
-    comment_text: str,
-    is_private: bool = True,
-    included_forecast: bool = True,
-) -> None:
-    """Force the reasoning comment public, whatever the caller asked for."""
-    return _original_post_question_comment(
-        self, post_id, comment_text, False, included_forecast
-    )
-
-
-_MetaculusClient.post_question_comment = _public_post_question_comment
-logger.info("Prize-eligibility patch applied: comments will be posted PUBLICLY.")
-# --- end prize-eligibility patch -------------------------------------------
-
 # =============================================================================
 # PHASE 1 CONFIGURATION  —  all tunables live here, nowhere else.
 #
