@@ -1,0 +1,50 @@
+name: Heartbeat
+
+# WHY THIS EXISTS
+#
+# GitHub disables scheduled workflows after 60 days with no repository
+# ACTIVITY — and workflow runs do not count as activity. Only commits do.
+# A tournament season runs about four months.
+#
+# Without this, a bot that is working perfectly would have its schedule
+# silently switched off around day 60. No error, no failed run, no email.
+# We would find out from the leaderboard, weeks later.
+#
+# This commits a timestamp once a week, which resets that clock.
+# It makes no API calls and costs nothing on a public repository.
+
+on:
+  schedule:
+    - cron: "13 6 * * 1"   # 06:13 UTC every Monday, off the hour on purpose:
+                           # GitHub drops scheduled runs at popular times.
+  workflow_dispatch:
+
+permissions:
+  contents: write          # required to push the timestamp commit
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Update heartbeat timestamp
+        run: |
+          mkdir -p .github
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/HEARTBEAT
+          echo "Repository activity marker. See heartbeat.yaml for why." >> .github/HEARTBEAT
+
+      - name: Commit
+        run: |
+          git config user.name  "heartbeat"
+          git config user.email "heartbeat@users.noreply.github.com"
+          git add .github/HEARTBEAT
+          # --allow-empty so a no-change week still produces a commit,
+          # which is the whole point of the exercise.
+          git commit --allow-empty -m "chore: heartbeat (keeps scheduled workflows enabled)"
+          git push

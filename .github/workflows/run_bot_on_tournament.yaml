@@ -3,7 +3,14 @@ name: Forecast on new AI tournament questions
 on:
   workflow_dispatch:
   schedule:
-    - cron: "7,27,47 * * * *" # every 20 min, offset off the hour. Make sure to skip already-forecasted questions!
+    # Every 10 minutes, offset off the hour. Questions open at random hours for
+    # only 1.5h (temporarily 3h). GitHub cron is imprecise and drops runs under
+    # load; the top open-source bot attributes ~150 forfeited peer points to
+    # questions missed this way. Cadence is the cheapest mitigation available.
+    # Deliberately ONE workflow: two overlapping schedules could each see a
+    # question as unforecast and submit twice, breaching one-forecast-per-question.
+    # The concurrency group below prevents overlapping runs.
+    - cron: "3,13,23,33,43,53 * * * *"
 
 # Add concurrency group to prevent parallel runs
 concurrency:
