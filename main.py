@@ -44,6 +44,33 @@ from forecasting_tools import (
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
+# --- PRIZE-ELIGIBILITY PATCH: make reasoning comments public ----------------
+# See the long note in patch_phase1.py. Upstream posts is_private=True.
+import requests as _requests  # noqa: E402
+from forecasting_tools.forecast_helpers.metaculus_api import (  # noqa: E402
+    MetaculusApi as _MetaculusApi,
+)
+
+
+def _post_public_question_comment(post_id: int, comment_text: str) -> None:
+    """Post the bot's reasoning as a PUBLIC comment, as the rules require."""
+    response = _requests.post(
+        f"{_MetaculusApi.API_BASE_URL}/comments/create/",
+        json={
+            "on_post": post_id,
+            "text": comment_text,
+            "is_private": False,
+            "included_forecast": True,
+        },
+        **_MetaculusApi._get_auth_headers(),  # type: ignore[arg-type]
+    )
+    response.raise_for_status()
+    logger.info("Posted PUBLIC comment on post %s", post_id)
+
+
+_MetaculusApi.post_question_comment = staticmethod(_post_public_question_comment)
+# --- end prize-eligibility patch -------------------------------------------
+
 # =============================================================================
 # PHASE 1 CONFIGURATION  —  all tunables live here, nowhere else.
 #
