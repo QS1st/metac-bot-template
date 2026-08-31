@@ -12,6 +12,22 @@ different bot.
 
 ---
 
+## 2026-09-01 — free-model providers swapped, endpoint preflight added
+
+- **Default model moved to `z-ai/glm-5.2:free` (Decart); parser and summariser
+  stay on `minimax/minimax-m3:free` (GMICloud).** Two independent providers,
+  neither of which has failed us. We have now lost runs to Nvidia (a model that
+  404'd mid-run while still listed and still reporting healthy) and to Google AI
+  Studio (a 429 from its shared free pool), so both are avoided.
+- **Every free model on OpenRouter has exactly one serving endpoint.** There is
+  no failover, which is why free-tier outages are total rather than degraded.
+  Worth knowing before trusting one for anything that matters.
+- **Added a startup preflight** that queries each configured free model's
+  endpoint status and logs it. Deliberately warn-only: a health check should not
+  become a new way for the run to die, and "healthy" has already proved not to
+  guarantee availability. Its value is putting a provider outage at the top of
+  the log instead of leaving it to be inferred from a wall of 404s.
+
 ## 2026-08-31 — reliability pass
 
 - **Forecast cadence raised from every 20 minutes to every 10.** Tournament

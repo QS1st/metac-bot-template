@@ -89,15 +89,35 @@ USE_FREE_MODELS = True
 # read a question, form a forecast and post it. "no_research" skips the search
 # step entirely, which removes a dependency we don't need while smoke-testing.
 # Parser and summarizer deliberately sit on a DIFFERENT upstream provider from
-# the default model. Our second test run died on a 429 from Google AI Studio's
-# shared free pool, and putting every call through one provider makes that a
-# single point of failure.
+# the default model. One provider must not be a single point of failure.
+#
+# EVERY free model on OpenRouter has exactly ONE serving endpoint — a single
+# provider, with no failover. That is why free-tier outages are total rather
+# than degraded. Checked 1 Sept 2026 via
+#   https://openrouter.ai/api/v1/models/<id>:free/endpoints
+# which exposes a per-endpoint `status` (0 = normal, negative = degraded).
+#
+# Providers that have already failed us, and are avoided here:
+#   Nvidia           — nemotron-3-ultra 404'd mid-run on 30 Aug ("Provider
+#                      returned error"), despite still being listed and still
+#                      reporting status 0. Listing is not availability.
+#   Google AI Studio — gemma-4-31b 429'd on 29 Aug from its shared free pool.
+#
+# So: default on Decart, parser/summarizer on GMICloud. Neither has failed us,
+# and they are independent of each other.
 FREE_MODELS = {
-    "default": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "default": "openrouter/z-ai/glm-5.2:free",
     "summarizer": "openrouter/minimax/minimax-m3:free",
     "parser": "openrouter/minimax/minimax-m3:free",
     "researcher": "no_research",
 }
+
+# Endpoint-status preflight. Logs the health of each configured free model
+# before forecasting starts, so a provider outage appears at the top of the run
+# log as a warning rather than as a wall of 404s two minutes in. Deliberately
+# WARN-ONLY: a status check is not worth turning into a new way for the run to
+# die, and status 0 has already proved not to guarantee availability.
+PREFLIGHT_FREE_MODELS = True
 
 # Season tier. claude-fable-5 is the default because it currently sits top of
 # Metaculus's own FutureEval model leaderboard (13.23, ahead of Claude Opus 4.8
@@ -119,6 +139,53 @@ ENSEMBLE_MODELS = [
     "openrouter/google/gemini-3.1-pro-preview",
     "openrouter/x-ai/grok-4.6",
 ]
+
+
+def preflight_check_free_models() -> None:
+    """Log the serving status of each configured free model. Never raises.
+
+    Free models have a single endpoint each, so when a provider goes down the
+    failure is total. This surfaces that at the top of the log instead of
+    leaving us to infer it from a wall of 404s.
+    """
+    if not (USE_FREE_MODELS and PREFLIGHT_FREE_MODELS):
+        return
+    # Imported locally: main.py does not import these at module level, and a
+    # NameError here would be swallowed by the except below — leaving a
+    # preflight that silently checks nothing, which is worse than none.
+    import json
+    import urllib.request
+
+    checked = set()
+    for role, model in FREE_MODELS.items():
+        if not model.startswith("openrouter/"):
+            continue
+        model_id = model[len("openrouter/") :]
+        if model_id in checked:
+            continue
+        checked.add(model_id)
+        try:
+            url = f"https://openrouter.ai/api/v1/models/{model_id}/endpoints"
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                payload = json.loads(resp.read().decode())
+            endpoints = (payload.get("data") or {}).get("endpoints") or []
+            if not endpoints:
+                logger.warning("PREFLIGHT: %s has NO serving endpoints", model_id)
+                continue
+            for ep in endpoints:
+                status = ep.get("status", 0)
+                provider = ep.get("provider_name", "?")
+                if status == 0:
+                    logger.info("PREFLIGHT: %s ok via %s", model_id, provider)
+                else:
+                    logger.warning(
+                        "PREFLIGHT: %s reports status %s via %s — expect failures",
+                        model_id,
+                        status,
+                        provider,
+                    )
+        except Exception as exc:  # never let a health check break the run
+            logger.warning("PREFLIGHT: could not check %s (%s)", model_id, exc)
 
 
 def predictions_per_report():
@@ -821,6 +888,7 @@ if __name__ == "__main__":
         llms=build_llm_config(),
     )
     template_bot.predictions_per_research_report = predictions_per_report()
+    preflight_check_free_models()
 
     # Per-mode tournament URL shown in the summary banner footer. These
     # piggyback on the forecasting_tools SDK constants and need updating
