@@ -12,6 +12,31 @@ different bot.
 
 ---
 
+## 2026-09-01 (later still) — run-time budget
+
+Everything here is aimed at one fact: tournament questions are open for
+**1.5 hours**, launch at random hours, and arrive **up to five at a time**. A
+run that overruns scores zero on every question it didn't reach, and because
+the season total is squared, misses compound. The top open-source bot's author
+attributes ~150 forfeited points — most of a placing tier — to missed
+questions, none of it a forecasting problem.
+
+- **Questions processed concurrently raised from 1 to 3** (still 1 on the free
+  tier). One-at-a-time is right for a rate-limited shared pool and wrong for a
+  90-minute window containing five questions. Serial worst case in-season is
+  roughly five questions × five predictions × ~30s ≈ 12 minutes; at three
+  concurrent that becomes 4–5. Safe now only because paid models have real
+  capacity and many endpoints.
+- **Retries cut from 6 to 3, and the per-call timeout from 120s to 90s** on the
+  paid tiers. This is the "never retry a slow failure" rule: retrying a timeout
+  multiplies the wait rather than fixing anything. The old settings meant a
+  single stubborn call could burn **twelve minutes** on its own; it is now
+  4m30s. Free-tier 429s are transient and still get six tries.
+- **`timeout-minutes: 20` on the forecasting job.** A hung run would otherwise
+  hold the concurrency group for GitHub's six-hour default, silently blocking
+  every subsequent run and costing an afternoon of questions. A healthy full
+  pass takes about three minutes.
+
 ## 2026-09-01 (later) — abandoned the free tier for development
 
 Four runs died on free models across three separate providers: a 429 from

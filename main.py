@@ -154,6 +154,34 @@ TEST_MODELS = {
 # die, and status 0 has already proved not to guarantee availability.
 PREFLIGHT_FREE_MODELS = True
 
+# -----------------------------------------------------------------------------
+# RUN-TIME BUDGET
+#
+# Tournament questions are open for only 1.5 hours (temporarily 3), launch at
+# random hours, and arrive up to FIVE at a time. A run that overruns the window
+# scores zero on every question it did not reach — and a missed question is a
+# zero in a total that is then squared, so misses compound.
+#
+# The top open-source bot's author attributes ~150 forfeited peer points, most
+# of a placing tier, to missed questions. None of it was a forecasting problem.
+# -----------------------------------------------------------------------------
+
+# How many questions to work on at once. The template ships 1, which is right
+# for a rate-limited free tier and wrong for a 90-minute window with five
+# questions in it. Serial worst case in-season is roughly 5 questions x 5
+# predictions x ~30s = ~12 minutes; at 3 concurrent that is ~4-5 minutes.
+# Paid models have many endpoints and real capacity, so concurrency is safe
+# here in a way it never was on a shared free pool.
+MAX_CONCURRENT_QUESTIONS = 1 if MODEL_TIER == "free" else 3
+
+# Retries per LLM call. This is the "never retry a slow failure" rule.
+# At timeout=120s, the old value of 6 meant one stubborn call could burn TWELVE
+# MINUTES on its own — retrying a timeout multiplies the wait rather than
+# fixing anything. Free-tier 429s are transient and worth retrying; paid
+# failures usually are not, and OpenRouter already fails over between endpoints.
+LLM_ALLOWED_TRIES = 6 if MODEL_TIER == "free" else 3
+LLM_TIMEOUT_SECONDS = 120 if MODEL_TIER == "free" else 90
+
 # Season tier. claude-fable-5 is the default because it currently sits top of
 # Metaculus's own FutureEval model leaderboard (13.23, ahead of Claude Opus 4.8
 # on 13.06 and GPT-5.5 Instant on 12.81). Phase 2 will spread the ensemble
@@ -251,8 +279,8 @@ def build_llm_config():
         "default": GeneralLlm(
             model=chosen["default"],
             temperature=0.3,
-            timeout=120,
-            allowed_tries=6 if USE_FREE_MODELS else 3,
+            timeout=LLM_TIMEOUT_SECONDS,
+            allowed_tries=LLM_ALLOWED_TRIES,
         ),
         "summarizer": chosen["summarizer"],
         "parser": chosen["parser"],
@@ -339,9 +367,7 @@ class SummerTemplateBot2026(ForecastBot):
     Additionally OpenRouter has large rate limits immediately on account creation
     """
 
-    _max_concurrent_questions = (
-        1  # Set this to whatever works for your search-provider/ai-model rate limits
-    )
+    _max_concurrent_questions = MAX_CONCURRENT_QUESTIONS
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 1 if USE_FREE_MODELS else 2
 
