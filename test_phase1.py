@@ -9,32 +9,51 @@ Run:  python3 test_phase1.py
 """
 
 import ast
+import os as _os
 import pathlib
 import re as _re
 import sys
 import types
+from datetime import datetime as _datetime, timedelta, timezone as _timezone
 
 
-def load(*names):
+def load(*names, consts=()):
     """Load named top-level functions out of main.py without importing it.
 
     Importing main.py would pull in forecasting-tools and require credentials,
     so we lift the functions we wrote and give them a stub namespace.
+
+    `consts` lifts module-level constants out of main.py rather than restating
+    their values here. That matters: a test that hard-codes what it expects the
+    code to say can agree with itself while disagreeing with the file, which is
+    exactly how the old _sorted_percentiles test asserted the wrong behaviour.
     """
     source = pathlib.Path(__file__).with_name("main.py").read_text()
     tree = ast.parse(source)
     module = types.ModuleType("harness")
     module.re = _re
+    module.os = _os
+    module.datetime, module.timezone = _datetime, _timezone
     module.logger = types.SimpleNamespace(
-        info=lambda *a, **k: None, warning=lambda *a, **k: None
+        info=lambda *a, **k: None,
+        warning=lambda *a, **k: None,
+        error=lambda *a, **k: None,
     )
     module.BINARY_FLOOR, module.BINARY_CEILING = 0.02, 0.98
     module.AMBIGUOUS_FLOOR, module.AMBIGUOUS_CEILING = 0.10, 0.90
     module.MC_OPTION_FLOOR = 0.01
 
     wanted = set(names)
+    wanted_consts = set(consts)
     found = {}
     for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if wanted_consts.intersection(targets):
+                code = compile(
+                    ast.Module(body=[node], type_ignores=[]), "main.py", "exec"
+                )
+                exec(code, module.__dict__)
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
             code = compile(ast.Module(body=[node], type_ignores=[]), "main.py", "exec")
             exec(code, module.__dict__)
@@ -42,7 +61,12 @@ def load(*names):
     missing = wanted - set(found)
     if missing:
         raise AssertionError(f"not found in main.py — patch did not apply: {sorted(missing)}")
-    return [found[n] for n in names]
+    missing_consts = wanted_consts - set(module.__dict__)
+    if missing_consts:
+        raise AssertionError(
+            f"constants not found in main.py — patch did not apply: {sorted(missing_consts)}"
+        )
+    return [found[n] for n in names] + [module]
 
 
 class P:
@@ -64,7 +88,7 @@ def raises(fn, *args):
 
 
 def run():
-    sorted_percentiles, caps, floor_mc = load(
+    sorted_percentiles, caps, floor_mc, _ = load(
         "_sorted_percentiles", "caps_for_reasoning", "floor_and_renormalise"
     )
     failures = []
@@ -139,6 +163,54 @@ def run():
     approx("all-zero input becomes uniform, not a divide-by-zero", [p for _, p in out], [0.5, 0.5])
 
     check("empty list survives", floor_mc([]), [])
+
+    print("\n  -- season rollover guard --")
+    # The values come out of main.py rather than being restated here, so this
+    # block cannot pass while disagreeing with the code it is testing.
+    is_stale, resolve, mod = load(
+        "season_is_stale",
+        "resolve_seasonal_tournament",
+        consts=("SEASON_GUARD_DATE", "STALE_SEASON_IDS"),
+    )
+    guard = mod.SEASON_GUARD_DATE
+    before = guard - timedelta(seconds=1)
+    after = guard + timedelta(days=30)
+
+    check("the pinned SDK's Summer ID is on the stale list", 33022 in mod.STALE_SEASON_IDS, True)
+    check("during the Summer season the guard stays quiet", is_stale(33022, before), False)
+    check("after the rollover date the Summer ID is stale", is_stale(33022, after), True)
+    check("the guard date itself counts as after", is_stale(33022, guard), True)
+    check("the ID as a string is caught too", is_stale("33022", after), True)
+    check("the Summer slug is caught too", is_stale("summer-futureeval-2026", after), True)
+    check("a genuine Fall ID is not stale", is_stale(33099, after), False)
+    check("MiniBench's slug is never stale", is_stale("minibench", after), False)
+
+    class FakeClient:
+        CURRENT_AI_COMPETITION_ID = 33022
+
+    saved = _os.environ.pop("AIB_TOURNAMENT_ID", None)
+    try:
+        check("with no override we fall back to the SDK", resolve(FakeClient()), 33022)
+
+        _os.environ["AIB_TOURNAMENT_ID"] = "33099"
+        check("a numeric override is used, as an int", resolve(FakeClient()), 33099)
+
+        _os.environ["AIB_TOURNAMENT_ID"] = "  33099  "
+        check("whitespace around the override is stripped", resolve(FakeClient()), 33099)
+
+        _os.environ["AIB_TOURNAMENT_ID"] = "fall-futureeval-2026"
+        check("a slug override is used verbatim", resolve(FakeClient()), "fall-futureeval-2026")
+
+        _os.environ["AIB_TOURNAMENT_ID"] = "   "
+        check("a blank override falls back rather than breaking", resolve(FakeClient()), 33022)
+
+        # The whole point: an override the guard does not recognise must clear it.
+        _os.environ["AIB_TOURNAMENT_ID"] = "33099"
+        check("setting the override clears the guard", is_stale(resolve(FakeClient()), after), False)
+    finally:
+        _os.environ.pop("AIB_TOURNAMENT_ID", None)
+        if saved is not None:
+            _os.environ["AIB_TOURNAMENT_ID"] = saved
 
     print()
     if failures:

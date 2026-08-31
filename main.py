@@ -46,8 +46,12 @@ logger = logging.getLogger(__name__)
 
 # Used by caps_for_reasoning(). The upstream template does not import re, and
 # a missing import here would raise on EVERY binary question — caught by the
-# build check on 1 Sept, which is why that check exists.
+# build check added 31 Aug 2026, which is why that check exists.
 import re  # noqa: E402
+
+# Used by resolve_seasonal_tournament() to read the AIB_TOURNAMENT_ID
+# repository variable. Not imported upstream either; same failure mode.
+import os  # noqa: E402
 
 # =============================================================================
 # PHASE 1 CONFIGURATION  —  all tunables live here, nowhere else.
@@ -362,6 +366,93 @@ def build_llm_config():
         "parser": chosen["parser"],
         "researcher": chosen["researcher"],
     }
+
+
+# =============================================================================
+# SEASON ROLLOVER
+#
+# The seasonal tournament ID is not ours to set. It arrives from the
+# forecasting-tools SDK as MetaculusClient.CURRENT_AI_COMPETITION_ID, and
+# poetry.lock pins that SDK at 0.2.92 while the workflow installs with
+# `poetry install`, which honours the lock. Read at the 0.2.92 version-bump
+# commit AND at upstream main on 31 Aug 2026, the constants are:
+#
+#     FE_SUMMER_2026_ID         = 33022   # summer-futureeval-2026
+#     CURRENT_AI_COMPETITION_ID = FE_SUMMER_2026_ID
+#     CURRENT_MINIBENCH_ID      = "minibench"   <- a slug, season-independent
+#
+# Metaculus has published no Fall 2026 ID, in the SDK or on the site. The
+# pinned value will therefore still say Summer when the Fall season opens.
+#
+# Why that is dangerous rather than merely wrong: the SDK fetches questions via
+# get_all_open_questions_from_tournament(), which filters on
+# allowed_tournaments=[id] with status "open" and returns whatever comes back.
+# A finished tournament returns ZERO questions — no exception, no warning — and
+# the run exits GREEN. Seasons run about four months. Left alone this bot would
+# forecast on nothing for an entire season while every scheduled run showed a
+# tick, which is the most expensive failure available to us.
+#
+# MiniBench is unaffected: "minibench" is a slug that survives the rollover.
+#
+# Rolling the season over needs no code change:
+#   GitHub -> Settings -> Secrets and variables -> Actions -> Variables -> New
+#   Name:  AIB_TOURNAMENT_ID
+#   Value: the Fall 2026 project ID (e.g. 33099) or its slug
+# Until that is set, the guard below skips the seasonal half, still forecasts
+# MiniBench, and then fails the run so the workflow turns red.
+# =============================================================================
+
+# When the alarm starts sounding. Deliberately NOT the day Summer stops posting
+# questions (early September): between then and the Fall launch there is nothing
+# anyone could do about it, since Metaculus has not published a Fall ID, and an
+# alarm nobody can act on is one people learn to ignore. Aiming at a finished
+# tournament in that gap is free — zero questions means zero model calls — so
+# the guard waits until a week before Fall opens on 28 September. That is one
+# week of red runs to find and set the ID, and no false alarms before it.
+SEASON_GUARD_DATE = datetime(2026, 9, 21, tzinfo=timezone.utc)
+
+# What the pinned SDK still points at. Both the numeric and slug forms are
+# listed because either can arrive depending on where the value came from.
+STALE_SEASON_IDS = frozenset({33022, "33022", "summer-futureeval-2026"})
+
+SEASON_STALE_MESSAGE = (
+    "SEASON ROLLOVER NOT DONE. The seasonal target is still Summer 2026, which "
+    "has stopped posting questions: forecasting it would return zero questions "
+    "and exit green. The seasonal half of this run was SKIPPED; MiniBench was "
+    "forecast as normal. Fix: set the repository variable AIB_TOURNAMENT_ID "
+    "(Settings > Secrets and variables > Actions > Variables) to the Fall 2026 "
+    "tournament ID or slug."
+)
+
+
+def resolve_seasonal_tournament(client) -> int | str:
+    """The seasonal tournament to forecast on, environment override first.
+
+    AIB_TOURNAMENT_ID exists because the Fall ID is not knowable today, and a
+    repository variable can be set without editing, testing and redeploying
+    code mid-season.
+    """
+    override = os.environ.get("AIB_TOURNAMENT_ID", "").strip()
+    if override:
+        resolved = int(override) if override.isdigit() else override
+        logger.info("Seasonal tournament %r (from AIB_TOURNAMENT_ID)", resolved)
+        return resolved
+    resolved = client.CURRENT_AI_COMPETITION_ID
+    logger.info("Seasonal tournament %r (from the forecasting-tools SDK)", resolved)
+    return resolved
+
+
+def season_is_stale(tournament_id, now=None) -> bool:
+    """True when the seasonal target is a tournament that has finished.
+
+    Deliberately returns a bool rather than raising: the caller still needs to
+    forecast MiniBench before failing the run. Exiting here would turn one
+    misconfiguration into two forfeited tournaments.
+    """
+    now = now if now is not None else datetime.now(timezone.utc)
+    if now < SEASON_GUARD_DATE:
+        return False
+    return tournament_id in STALE_SEASON_IDS
 
 
 
@@ -1148,25 +1239,29 @@ if __name__ == "__main__":
     assert_tier_matches_mode(run_mode)
     preflight_check_free_models()
 
-    # Per-mode tournament URL shown in the summary banner footer. These
-    # piggyback on the forecasting_tools SDK constants and need updating
-    # whenever those rotate seasons.
-    TOURNAMENT_URLS = {
-        "tournament": "https://www.metaculus.com/tournament/summer-futureeval-2026/",
-        "metaculus_cup": "https://www.metaculus.com/tournament/metaculus-cup-summer-2025/",
-        "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
-    }
-
     # Dispatch on mode. Each branch produces a list of ForecastReport (or
     # exceptions, since return_exceptions=True) which then flows into the
     # summary printers below.
     client = MetaculusClient()
+    seasonal_id = None
+    stale_season = False
     if run_mode == "tournament":
-        seasonal_tournament_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
+        seasonal_id = resolve_seasonal_tournament(client)
+        stale_season = season_is_stale(seasonal_id)
+        if stale_season:
+            # Logged here so the reason appears in the run log next to the
+            # MiniBench work, and raised again at the very end so the workflow
+            # itself goes red. See the SEASON ROLLOVER block above.
+            logger.error(SEASON_STALE_MESSAGE)
+            seasonal_tournament_reports = []
+        else:
+            seasonal_tournament_reports = asyncio.run(
+                template_bot.forecast_on_tournament(
+                    seasonal_id, return_exceptions=True
+                )
             )
-        )
+        # MiniBench is keyed by a slug, so it survives the season rollover and
+        # is forecast even when the seasonal half has been skipped.
         minibench_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 client.CURRENT_MINIBENCH_ID, return_exceptions=True
@@ -1194,9 +1289,25 @@ if __name__ == "__main__":
             )
         )
 
+    # Per-mode tournament URL shown in the summary banner footer. The seasonal
+    # entry is built from the ID actually forecast rather than hard-coded, so
+    # the link cannot drift away from what the bot really did. Metaculus
+    # redirects /tournament/<numeric id>/ to the slug (checked 31 Aug 2026).
+    TOURNAMENT_URLS = {
+        "tournament": f"https://www.metaculus.com/tournament/{seasonal_id}/",
+        "metaculus_cup": "https://www.metaculus.com/tournament/metaculus-cup-summer-2025/",
+        "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
+    }
+
     template_bot.log_report_summary(forecast_reports)
     print_run_summary_banner(
         forecast_reports,
         will_publish=publish_to_metaculus,
         tournament_url=TOURNAMENT_URLS.get(run_mode),
     )
+
+    # Last thing in the file, so the log and banner are complete first. A red
+    # workflow run every ten minutes is the point: silence is what costs a
+    # season, and nothing else in this repository would notice.
+    if stale_season:
+        raise SystemExit(SEASON_STALE_MESSAGE)

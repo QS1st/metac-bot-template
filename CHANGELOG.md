@@ -12,6 +12,65 @@ different bot.
 
 ---
 
+## 2026-08-31 (night) — the season rollover, which nothing would have caught
+
+The last of the audit findings, and the one that could have cost the whole
+season without producing a single error.
+
+**What the code actually does.** The seasonal tournament is not something this
+repository chooses. It arrives from the forecasting-tools SDK as
+`MetaculusClient.CURRENT_AI_COMPETITION_ID`. `poetry.lock` pins that SDK at
+0.2.92 and the workflow installs with `poetry install`, which honours the lock,
+so the value is frozen. Read at the 0.2.92 version-bump commit and again at
+upstream `main`:
+
+    FE_SUMMER_2026_ID         = 33022   # summer-futureeval-2026
+    CURRENT_AI_COMPETITION_ID = FE_SUMMER_2026_ID
+    CURRENT_MINIBENCH_ID      = "minibench"
+
+Metaculus has published no Fall 2026 ID, in the SDK or on the site. Seasons
+start every January, May and September; the Summer tournament stops posting
+questions in early September and Fall opens on 28 September.
+
+**Why it is silent.** `get_all_open_questions_from_tournament()` filters on
+`allowed_tournaments=[id]` with status `open` and returns whatever comes back.
+A finished tournament returns zero questions. No exception, no warning, and the
+run exits green. A season runs about four months, so the bot would have
+forecast on nothing until Christmas while every scheduled run showed a tick.
+Ten green test runs proved nothing about this, because in August the Summer ID
+is still correct.
+
+- **The seasonal tournament is now resolved through `AIB_TOURNAMENT_ID`**, a
+  repository variable, falling back to the SDK constant. A variable rather than
+  a constant because the Fall ID is not knowable today and mid-season is a poor
+  time to be editing, testing and redeploying code.
+- **A dated guard turns silence into a red workflow.** From 21 September, a
+  seasonal target still equal to the Summer tournament is treated as a
+  misconfiguration: the seasonal half is skipped, the reason is logged, and the
+  run exits non-zero. GitHub then reports a failure every ten minutes until
+  somebody sets the variable, which is the intended level of nuisance. The date
+  is a week before Fall opens rather than the day Summer ends, because in the
+  gap between the two there is no Fall ID to set and an alarm nobody can act on
+  is one people learn to ignore. Aiming at a finished tournament during that
+  gap is free: zero questions means zero model calls.
+- **MiniBench is deliberately still forecast** in that state. Its ID is the
+  slug `"minibench"`, which survives the rollover, so failing early would have
+  turned one misconfiguration into two forfeited tournaments. The guard returns
+  a boolean and the run fails at the very end, after the banner.
+- **The banner's tournament link is now derived from the ID actually used**
+  rather than hard-coded to the Summer URL, so it cannot describe a tournament
+  the bot did not forecast. Metaculus redirects `/tournament/<numeric id>/` to
+  the slug, checked live.
+
+Fourteen unit tests cover it, and the harness now lifts `SEASON_GUARD_DATE` and
+`STALE_SEASON_IDS` out of `main.py` instead of restating them — a test that
+hard-codes what it expects the code to say can agree with itself while
+disagreeing with the file, which is precisely how the old `_sorted_percentiles`
+test came to assert the wrong behaviour.
+
+Also corrected: a comment dated a build check to "1 Sept", a date that had not
+happened yet.
+
 ## 2026-08-31 (evening) — adversarial audit, and four season-ending fixes
 
 Two independent auditors were briefed to find ways this bot loses points, and
