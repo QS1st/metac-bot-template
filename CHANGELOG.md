@@ -12,6 +12,36 @@ different bot.
 
 ---
 
+## 2026-09-01 (later) — abandoned the free tier for development
+
+Four runs died on free models across three separate providers: a 429 from
+Google AI Studio's pool, a model that 404'd mid-run at Nvidia, OpenRouter's
+50-request daily ceiling, and a 429 from Decart. That is structural rather
+than unlucky, and the endpoint API shows why:
+
+    z-ai/glm-5.2:free ........  1 endpoint    (Decart)
+    nvidia/nemotron:free .....  1 endpoint    (Nvidia)
+    google/gemma-4-31b:free ..  1 endpoint    (Google AI Studio)
+    openai/gpt-5-nano ........  4 endpoints   (OpenAI, Azure)
+    openai/gpt-oss-120b ...... 20 endpoints   (AkashML, CoreWeave, DeepInfra,
+                                               Novita, SiliconFlow, Google, …)
+
+Every free model has exactly one serving endpoint on one provider's shared
+pool. No failover, and the pool is shared globally, so it rate-limits under
+any sustained load. Paid models have many endpoints and OpenRouter routes
+around dead ones.
+
+- **Configuration restructured into three tiers** — `free` (kept for
+  reference, not recommended), `test` (cheap paid models, what we develop
+  against), `season` (frontier models on Metaculus's credits). Selected by a
+  single `MODEL_TIER` constant, which raises a clear error if misspelled.
+- **Test tier: `openai/gpt-5-nano` as default, `openai/gpt-oss-120b` for
+  parsing and summarising.** Chosen for endpoint count as much as price.
+  Prices verified live: $0.05/$0.40 and $0.037/$0.17 per million tokens, so a
+  seven-question smoke test costs under two pence.
+- The endpoint preflight now runs only on the free tier, where a single
+  endpoint status is actually the whole story.
+
 ## 2026-09-01 — free-model providers swapped, endpoint preflight added
 
 - **Default model moved to `z-ai/glm-5.2:free` (Decart); parser and summariser

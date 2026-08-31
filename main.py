@@ -81,9 +81,29 @@ RESEARCH_REPORTS_PER_QUESTION = 1
 # starts returning "No endpoints found", re-check that endpoint first.
 # -----------------------------------------------------------------------------
 
-# True  = free models, zero balance, for testing that the plumbing works.
-# False = frontier models, billed per use. Flip this when credits arrive.
-USE_FREE_MODELS = True
+# THREE TIERS.
+#
+#   "free"   — :free models, zero balance. KEPT FOR REFERENCE, NOT RECOMMENDED.
+#              Four runs died on it across three providers. Every :free model
+#              has exactly ONE serving endpoint on one provider's shared pool,
+#              so there is no failover and the pool rate-limits under any load.
+#   "test"   — cheap paid models. What we develop against.
+#   "season" — frontier models, on Metaculus's credits, for the tournament.
+#
+# The difference is structural, not a matter of picking a better free model
+# (checked 1 Sept 2026 via the /endpoints API):
+#   z-ai/glm-5.2:free .......  1 endpoint   (Decart)          -> 429'd us
+#   nvidia/nemotron:free ....  1 endpoint   (Nvidia)          -> 404'd us
+#   google/gemma-4-31b:free .  1 endpoint   (Google AI Studio)-> 429'd us
+#   openai/gpt-5-nano ....... 4 endpoints   (OpenAI, Azure)
+#   openai/gpt-oss-120b ..... 20 endpoints  (AkashML, CoreWeave, DeepInfra,
+#                                            Novita, SiliconFlow, Google, ...)
+# OpenRouter routes around dead endpoints automatically, so a paid model
+# tolerates a provider outage that kills a free one outright.
+MODEL_TIER = "test"
+
+# Back-compat: several helpers below still ask "are we on the cheap tier?"
+USE_FREE_MODELS = MODEL_TIER in ("free", "test")
 
 # Free tier. Not frontier, not competitive — these exist to prove the bot can
 # read a question, form a forecast and post it. "no_research" skips the search
@@ -109,6 +129,21 @@ FREE_MODELS = {
     "default": "openrouter/z-ai/glm-5.2:free",
     "summarizer": "openrouter/minimax/minimax-m3:free",
     "parser": "openrouter/minimax/minimax-m3:free",
+    "researcher": "no_research",
+}
+
+# TEST tier — cheap paid models, chosen for endpoint COUNT as much as price.
+# Prices verified against OpenRouter's live model list, 1 Sept 2026, per 1M
+# tokens (input / output):
+#   openai/gpt-5-nano    $0.050 / $0.400   400k ctx,  4 endpoints
+#   openai/gpt-oss-120b  $0.037 / $0.170   131k ctx, 20 endpoints
+# A 7-question smoke test at one prediction each is roughly 14 calls and well
+# under 100k tokens total — comfortably under two pence a run. The $10 balance
+# should therefore cover several hundred test runs, not several.
+TEST_MODELS = {
+    "default": "openrouter/openai/gpt-5-nano",
+    "summarizer": "openrouter/openai/gpt-oss-120b",
+    "parser": "openrouter/openai/gpt-oss-120b",
     "researcher": "no_research",
 }
 
@@ -148,7 +183,9 @@ def preflight_check_free_models() -> None:
     failure is total. This surfaces that at the top of the log instead of
     leaving us to infer it from a wall of 404s.
     """
-    if not (USE_FREE_MODELS and PREFLIGHT_FREE_MODELS):
+    # Only meaningful on the free tier: paid models have many endpoints and
+    # OpenRouter routes around dead ones, so a single status is not the story.
+    if not (MODEL_TIER == "free" and PREFLIGHT_FREE_MODELS):
         return
     # Imported locally: main.py does not import these at module level, and a
     # NameError here would be swallowed by the except below — leaving a
@@ -194,11 +231,16 @@ def predictions_per_report():
 
 
 def build_llm_config():
-    """Return the llms= mapping for the bot, per USE_FREE_MODELS."""
-    chosen = FREE_MODELS if USE_FREE_MODELS else SEASON_MODELS
+    """Return the llms= mapping for the bot, per MODEL_TIER."""
+    tiers = {"free": FREE_MODELS, "test": TEST_MODELS, "season": SEASON_MODELS}
+    if MODEL_TIER not in tiers:
+        raise ValueError(
+            f"MODEL_TIER must be one of {sorted(tiers)}, got {MODEL_TIER!r}"
+        )
+    chosen = tiers[MODEL_TIER]
     logger.info(
         "Model tier: %s | default=%s | predictions/question=%d",
-        "FREE" if USE_FREE_MODELS else "SEASON",
+        MODEL_TIER.upper(),
         chosen["default"],
         predictions_per_report(),
     )
