@@ -44,6 +44,11 @@ from forecasting_tools import (
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
+# Used by caps_for_reasoning(). The upstream template does not import re, and
+# a missing import here would raise on EVERY binary question — caught by the
+# build check on 1 Sept, which is why that check exists.
+import re  # noqa: E402
+
 # =============================================================================
 # PHASE 1 CONFIGURATION  —  all tunables live here, nowhere else.
 #
@@ -57,6 +62,26 @@ logger = logging.getLogger(__name__)
 # 2025 winners cap; 47% of the top fifteen do, against 29% of the bottom half.
 BINARY_FLOOR = 0.02
 BINARY_CEILING = 0.98
+
+# AMBIGUITY-BOUNDED CONFIDENCE.
+#
+# Peer score = 100 x (ln(p) - ln(geometric mean of other bots)). It is brutally
+# asymmetric: moving 99% -> 99.9% gains 0.009 when right and costs 2.3 when
+# wrong. The expensive error is confident-and-wrong.
+#
+# A systematic source of confident-and-wrong is not misjudging the world but
+# answering a different question from the one asked. Observed live in the
+# Metaculus bot Discord, 29 Aug 2026: "a lot of bots including mine
+# misinterpreted this question... interpreting as 'July is the annual max'
+# instead of 'July is a NEW annual max'." A whole cohort, one word.
+#
+# Other entrants enumerate interpretations to INFORM the forecast. We
+# additionally let interpretation ambiguity BOUND it: where competing readings
+# of the criteria would resolve differently, the bot is not entitled to
+# confidence however sure it is about the world. Uncertainty about the world
+# belongs in the probability; uncertainty about the QUESTION is handled here.
+AMBIGUOUS_FLOOR = 0.10
+AMBIGUOUS_CEILING = 0.90
 
 # Number of independent forecasts aggregated per question. STRONG evidence for
 # ensembling (86% of winners aggregate). Phase 2 will widen this across model
@@ -456,7 +481,27 @@ class SummerTemplateBot2026(ForecastBot):
             resolution date, and check whether the reported event actually satisfies
             them. Reporting that resembles the outcome is not the same as the outcome.
 
-            Before answering you write:
+            FIRST, before anything else, read the resolution criteria adversarially.
+            You are forecasting the exact wording, not the general topic. A single
+            word routinely changes the answer — "the annual maximum" and "a NEW
+            annual maximum" are different questions, and forecasters who answer the
+            topic rather than the text lose on questions they understood perfectly.
+
+            Write:
+            (i)  The strictest reasonable reading of the resolution criteria, stated
+                 as a precise test that some observable fact would have to pass.
+            (ii) Any OTHER reading a careful person might take. If a different
+                 reading would resolve the question differently, say so explicitly.
+
+            Then, on its own line, exactly one of:
+            AMBIGUITY: LOW
+            AMBIGUITY: HIGH
+            Use HIGH only when competing readings would genuinely resolve
+            differently — not merely because the future is uncertain. Uncertainty
+            about the world is normal and belongs in your probability. Uncertainty
+            about what is being ASKED is different, and we handle it separately.
+
+            Then write:
             (a) The time left until the outcome to the question is known.
             (b) The base rate: how often outcomes of this general kind occur over a
                 comparable period. State the reference class you are using and the
@@ -487,7 +532,8 @@ class SummerTemplateBot2026(ForecastBot):
             model=self.get_llm("parser", "llm"),
             num_validation_samples=self._structure_output_validation_samples,
         )
-        decimal_pred = max(BINARY_FLOOR, min(BINARY_CEILING, binary_prediction.prediction_in_decimal))
+        floor, ceiling = caps_for_reasoning(reasoning)
+        decimal_pred = max(floor, min(ceiling, binary_prediction.prediction_in_decimal))
 
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {decimal_pred}."
@@ -896,6 +942,33 @@ class SummerTemplateBot2026(ForecastBot):
             You never re-forecast the parent question under any circumstances, but you use probabilistic reasoning, strongly considering the parent question's resolution, to forecast the child question.
             """
         )
+
+
+def caps_for_reasoning(reasoning: str) -> tuple[float, float]:
+    """Return (floor, ceiling) for a binary forecast, tightened if the model
+    flagged the resolution criteria as genuinely ambiguous.
+
+    Fails SAFE: a missing, malformed or contradictory flag yields the normal
+    caps, so a parsing problem can never silently make the bot MORE confident.
+    """
+    text = reasoning or ""
+    high = re.search(r"AMBIGUITY\s*:\s*HIGH", text, re.IGNORECASE) is not None
+    low = re.search(r"AMBIGUITY\s*:\s*LOW", text, re.IGNORECASE) is not None
+
+    if high and not low:
+        logger.info(
+            "Resolution criteria flagged AMBIGUOUS — capping to %.2f-%.2f",
+            AMBIGUOUS_FLOOR,
+            AMBIGUOUS_CEILING,
+        )
+        return AMBIGUOUS_FLOOR, AMBIGUOUS_CEILING
+    if high and low:
+        # Both present: the model contradicted itself, so we cannot trust the
+        # flag. Treat as not-ambiguous rather than guessing, but say so.
+        logger.warning(
+            "Both AMBIGUITY: HIGH and LOW present in reasoning — using normal caps"
+        )
+    return BINARY_FLOOR, BINARY_CEILING
 
 
 def _sorted_percentiles(percentile_list):

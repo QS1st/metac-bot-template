@@ -12,7 +12,38 @@ different bot.
 
 ---
 
-## 2026-09-01 (later still) — run-time budget
+## 2026-08-31 — resolution forensics, and ambiguity-bounded confidence
+
+The second pillar, replacing the reference-class engine the audit killed. This
+one needs no special data access — only careful reading.
+
+**The problem.** Peer score is brutally asymmetric: moving 99% to 99.9% gains
+0.009 when right and costs 2.3 when wrong, so the expensive error is
+confident-and-wrong. A systematic source of that is not misjudging the world
+but answering a different question from the one asked. Seen live in the
+Metaculus bot Discord on 29 August: *"a lot of bots including mine
+misinterpreted this question... interpreting as 'July is the annual max'
+instead of 'July is a NEW annual max'."* A whole cohort of bots, one word.
+
+- **Forensics stage added ahead of everything else in the binary prompt.** The
+  model must state the strictest reasonable reading of the criteria as a
+  precise test, then any other reading a careful person might take, and say
+  explicitly whether those readings would resolve differently.
+- **Ambiguity now bounds confidence.** The model emits `AMBIGUITY: LOW|HIGH`;
+  HIGH tightens the caps from 0.02–0.98 to 0.10–0.90. Uncertainty about the
+  world belongs in the probability. Uncertainty about *the question* is
+  different, and the bot is not entitled to confidence in the face of it.
+- **Fails safe by construction.** A missing, malformed or self-contradictory
+  flag yields the normal caps, so a parsing fault can never make the bot *more*
+  confident. Eleven unit tests cover it, including near-misses like the bare
+  word "ambiguity" and the phrase "not ambiguous".
+
+Note on novelty: at least one other entrant (Ora) performs resolution forensics
+to *inform* its forecast. Using interpretation ambiguity to *bound* confidence
+is the part we have not seen described, and it follows directly from the
+scoring rule rather than from intuition.
+
+## 2026-08-31 (later still) — run-time budget
 
 Everything here is aimed at one fact: tournament questions are open for
 **1.5 hours**, launch at random hours, and arrive **up to five at a time**. A
@@ -37,7 +68,7 @@ questions, none of it a forecasting problem.
   every subsequent run and costing an afternoon of questions. A healthy full
   pass takes about three minutes.
 
-## 2026-09-01 (later) — abandoned the free tier for development
+## 2026-08-31 (later) — abandoned the free tier for development
 
 Four runs died on free models across three separate providers: a 429 from
 Google AI Studio's pool, a model that 404'd mid-run at Nvidia, OpenRouter's
@@ -67,7 +98,7 @@ around dead ones.
 - The endpoint preflight now runs only on the free tier, where a single
   endpoint status is actually the whole story.
 
-## 2026-09-01 — free-model providers swapped, endpoint preflight added
+## 2026-08-31 — free-model providers swapped, endpoint preflight added
 
 - **Default model moved to `z-ai/glm-5.2:free` (Decart); parser and summariser
   stay on `minimax/minimax-m3:free` (GMICloud).** Two independent providers,
@@ -83,7 +114,7 @@ around dead ones.
   guarantee availability. Its value is putting a provider outage at the top of
   the log instead of leaving it to be inferred from a wall of 404s.
 
-## 2026-08-31 — reliability pass
+## 2026-08-30 (later) — reliability pass
 
 - **Forecast cadence raised from every 20 minutes to every 10.** Tournament
   questions open at random hours and stay open for only 1.5 hours (temporarily
