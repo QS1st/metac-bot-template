@@ -143,7 +143,23 @@ RESEARCH_REPORTS_PER_QUESTION = 1
 #                                            Novita, SiliconFlow, Google, ...)
 # OpenRouter routes around dead endpoints automatically, so a paid model
 # tolerates a provider outage that kills a free one outright.
-MODEL_TIER = "test"
+#
+# The tier can be overridden by an environment variable, so a run can be
+# re-pointed without a commit and a CI cycle — the same reasoning as
+# AIB_TOURNAMENT_ID further down. Set a GitHub repository variable named
+# MODEL_TIER, and delete it to fall back to the default below. Note this does
+# NOT weaken assert_tier_matches_mode: a scored tournament still refuses to run
+# on anything but "season", wherever the value came from.
+VALID_MODEL_TIERS = ("free", "test", "season")
+MODEL_TIER = (os.environ.get("MODEL_TIER") or "test").strip().lower()
+if MODEL_TIER not in VALID_MODEL_TIERS:
+    # Fail here rather than three steps later inside build_llm_config, so a
+    # typo in the repository variable names itself instead of surfacing as a
+    # confusing model error after the questions have already been fetched.
+    raise SystemExit(
+        f"MODEL_TIER must be one of {VALID_MODEL_TIERS}, got {MODEL_TIER!r}. "
+        "Check the MODEL_TIER repository variable."
+    )
 
 # Back-compat: several helpers below still ask "are we on the cheap tier?"
 USE_FREE_MODELS = MODEL_TIER in ("free", "test")

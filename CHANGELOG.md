@@ -12,6 +12,38 @@ different bot.
 
 ---
 
+## 2026-08-31 (night, last) — the repository variables actually reach the bot
+
+Writing the cost-probe instructions exposed a hole in the rollover fix made
+three entries ago. GitHub repository variables are **not** visible to a
+workflow's process unless the workflow passes them through explicitly.
+`AIB_TOURNAMENT_ID` was being read with `os.environ.get()` by code that would
+never have received it: setting the variable would have looked like the fix,
+changed nothing, and left the guard failing runs with no way to clear it.
+
+- **`AIB_TOURNAMENT_ID` and `MODEL_TIER` are now passed through** in
+  `run_bot_on_tournament.yaml` and `test_bot.yaml` as `${{ vars.NAME }}`. An
+  unset variable renders as an empty string, which `main.py` already treats as
+  "use the default", so nothing changes until a variable is deliberately set.
+- **`MODEL_TIER` can now be set by environment variable** as well as in code,
+  validated on the spot against `("free", "test", "season")` so a typo names
+  itself at startup rather than surfacing later as a confusing model error.
+  This does not weaken `assert_tier_matches_mode`: a scored tournament still
+  refuses to run on anything but `season`, whatever the source of the value.
+- **`test_bot.yaml` gains `timeout-minutes: 20`**, matching the tournament
+  workflow, since a season-tier probe runs five predictions per question
+  instead of one.
+
+The reason for the tier override is a cost probe. The Metaculus LLM credits are
+tied to the Seasonal tournament and cannot be applied for until Fall is
+announced, so any MiniBench trial before then runs on our own OpenRouter
+balance. The bot-testing-area holds seven questions, one of each type and
+never scored, which makes a bounded way to measure real cost per question at
+season-tier models before committing to a round of roughly sixty. Worth noting
+that the in-run cost figure cannot be trusted for this: `bot_helpers.py`
+suppresses a "does not support cost tracking" warning, so the OpenRouter
+account is the only reliable ground truth.
+
 ## 2026-08-31 (night, later) — parse validation, and two findings that weren't
 
 Closing out the audit list. One real change; two suspected faults tested and
