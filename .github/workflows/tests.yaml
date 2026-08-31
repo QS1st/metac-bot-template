@@ -1,0 +1,69 @@
+name: Tests
+
+# WHY THIS EXISTS
+#
+# Until 31 August 2026 the unit tests lived in the repository but nothing ever
+# ran them. They were run by hand, on a copy, before upload — which is exactly
+# the "verified against a convenient copy rather than the real thing" mistake
+# this project keeps making.
+#
+# An audit that day found a test asserting the WRONG behaviour (that a corrupt
+# numeric distribution should be repaired into a confident wrong answer rather
+# than discarded) and a multiple-choice floor that renormalisation silently
+# undid. Tests only help if something runs them.
+#
+# This runs on every push and every pull request. No API keys, no network,
+# no credentials — it lifts the pure functions out of main.py and exercises
+# them, so it is fast and cannot touch a live question.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: main.py must at least parse
+        run: python -m py_compile main.py
+
+      - name: Unit tests
+        run: python test_phase1.py
+
+      - name: The patch must still apply cleanly to upstream
+        # patch_phase1.py asserts each edit matches exactly once, so this fails
+        # loudly if the upstream template moves under us rather than silently
+        # producing a different bot.
+        run: |
+          git clone --depth 1 https://github.com/Metaculus/metac-bot-template.git /tmp/upstream
+          python patch_phase1.py /tmp/upstream/main.py /tmp/rebuilt.py
+          python -m py_compile /tmp/rebuilt.py
+
+      - name: The committed main.py must match what the patch produces
+        # Guards against hand-edits to main.py that never made it back into
+        # patch_phase1.py — which would make the build unreproducible and the
+        # disclosure document wrong.
+        run: |
+          if ! diff -q main.py /tmp/rebuilt.py; then
+            echo "::error::main.py does not match the output of patch_phase1.py"
+            diff main.py /tmp/rebuilt.py | head -40
+            exit 1
+          fi
+          echo "main.py is reproducible from the patch."
