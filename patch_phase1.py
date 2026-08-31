@@ -781,13 +781,31 @@ replace(
 # 7. FREE-TIER REQUEST BUDGET  (OpenRouter's free tier allows 50 requests per
 #    DAY in total, which three test runs exhausted. Every parse of a model's
 #    output is validated with N extra samples, so N is a direct multiplier on
-#    request count. On the free tier one sample is enough to prove the
-#    plumbing; the season keeps the template's default of 2.)
+#    request count. Originally 1 on the free tier only; an audit on 31 Aug 2026
+#    found the template's default of 2 can forfeit whole questions, so it is
+#    now 1 everywhere. See the comment inserted below.)
 # ---------------------------------------------------------------------------
 replace(
     "    _structure_output_validation_samples = 2",
-    "    _structure_output_validation_samples = 1 if USE_FREE_MODELS else 2",
-    "free-tier parse validation budget",
+    """    # Parse each reasoning text ONCE, not twice.
+    #
+    # The template's default of 2 re-parses the same text and raises if the two
+    # parses are not exactly equal (structure_output() compares the parsed
+    # objects with `!=` — verified in forecasting-tools 0.2.92). That kills the
+    # prediction sample, and the SDK forfeits the WHOLE question if fewer than
+    # required_successful_predictions (default 0.5) of the five samples
+    # survive. So three unlucky parses lose the question outright and it scores
+    # nothing — the exact failure the top open-source bot blamed for ~150
+    # forfeited peer points.
+    #
+    # The check is close to redundant here: five independent predictions are
+    # aggregated by median, which already outvotes one bad parse. It also
+    # doubles parser calls and latency inside a 90-minute window. The risk is
+    # worst precisely where we least want it — multiple choice, where the
+    # parser is instructed to emit 0% options and two parses of a long option
+    # list can differ by a digit.
+    _structure_output_validation_samples = 1""",
+    "parse validation samples: 1, never 2",
 )
 
 # ===========================================================================

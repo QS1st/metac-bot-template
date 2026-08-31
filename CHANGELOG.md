@@ -12,6 +12,54 @@ different bot.
 
 ---
 
+## 2026-08-31 (night, later) — parse validation, and two findings that weren't
+
+Closing out the audit list. One real change; two suspected faults tested and
+found harmless, recorded because a cleared suspicion is worth as much as a fix
+and stops it being re-investigated later.
+
+**Changed: reasoning is now parsed once, not twice.** The template sets
+`_structure_output_validation_samples = 2`, which re-parses the same reasoning
+text and raises if the two parses are not exactly equal — `structure_output()`
+compares the parsed objects with `!=`. A raise kills that prediction sample,
+and the SDK forfeits the **entire question** when fewer than
+`required_successful_predictions` (default 0.5) of the five samples survive.
+Three unlucky parses therefore lose the question outright, scoring nothing.
+
+The check earns little here: five independent predictions are already
+aggregated with `statistics.median`, which outvotes a single bad parse. It also
+doubles parser calls and latency inside a 90-minute window, and the failure is
+likeliest exactly where it hurts most — multiple choice, where the parser is
+told to emit 0% options and two parses of a long option list can differ by one
+digit. Set to 1 on every tier.
+
+**Tested and cleared: the two `asyncio.run` calls do not break MiniBench.**
+The concern was real in principle. `_concurrency_limiter` is a class-level
+`asyncio.Semaphore`, and a semaphore binds itself to the first event loop that
+contends it; a second `asyncio.run` creates a second loop, so MiniBench should
+have died with `RuntimeError: bound to a different event loop` on every
+question past the concurrency limit — silently, since `return_exceptions=True`
+swallows it. Reproduced exactly that in isolation: 3 of 60 questions survived.
+
+It does not happen, because `forecasting_tools/__init__.py` calls
+`nest_asyncio.apply()` at import, which patches `asyncio.run` to reuse the
+running loop rather than create a new one. Re-ran the same reproduction with
+`nest_asyncio` applied: one loop across both calls, 60 of 60 questions fine.
+Had this been "fixed" on the strength of the first reproduction alone, the
+result would have been added risk for no benefit.
+
+**Tested and cleared: the ambiguity cap interacting with median aggregation.**
+Each of the five predictions emits its own `AMBIGUITY` flag and has its own
+caps applied before the median is taken, so a tightened cap binds only when at
+least three of five samples call the question ambiguous. That is a majority
+vote, not a bug — and it is more robust than capping after aggregation, since
+one flaky flag cannot move the published forecast.
+
+Also noted, not changed: `_max_concurrent_questions` bounds `run_research`
+only. The forecasting calls beneath it are unbounded, so peak in-flight LLM
+calls at season are nearer 25 than 3. Fine on paid models with many endpoints;
+it would not have been on the free tier.
+
 ## 2026-08-31 (night) — the season rollover, which nothing would have caught
 
 The last of the audit findings, and the one that could have cost the whole

@@ -536,7 +536,24 @@ class SummerTemplateBot2026(ForecastBot):
 
     _max_concurrent_questions = MAX_CONCURRENT_QUESTIONS
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
-    _structure_output_validation_samples = 1 if USE_FREE_MODELS else 2
+    # Parse each reasoning text ONCE, not twice.
+    #
+    # The template's default of 2 re-parses the same text and raises if the two
+    # parses are not exactly equal (structure_output() compares the parsed
+    # objects with `!=` — verified in forecasting-tools 0.2.92). That kills the
+    # prediction sample, and the SDK forfeits the WHOLE question if fewer than
+    # required_successful_predictions (default 0.5) of the five samples
+    # survive. So three unlucky parses lose the question outright and it scores
+    # nothing — the exact failure the top open-source bot blamed for ~150
+    # forfeited peer points.
+    #
+    # The check is close to redundant here: five independent predictions are
+    # aggregated by median, which already outvotes one bad parse. It also
+    # doubles parser calls and latency inside a 90-minute window. The risk is
+    # worst precisely where we least want it — multiple choice, where the
+    # parser is instructed to emit 0% options and two parses of a long option
+    # list can differ by a digit.
+    _structure_output_validation_samples = 1
 
     ##################################### RESEARCH #####################################
 
