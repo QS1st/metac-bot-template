@@ -54,6 +54,15 @@ jobs:
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
+          # Repository VARIABLES (not secrets), and not visible to the process
+          # unless passed through here — an unset variable renders as an empty
+          # string, which main.py treats as "use the default".
+          #   AIB_TOURNAMENT_ID  the seasonal tournament, for the September
+          #                      rollover the pinned SDK cannot do for us.
+          #   MODEL_TIER         free | test | season, so the tier can change
+          #                      without a commit and a CI cycle.
+          AIB_TOURNAMENT_ID: ${{ vars.AIB_TOURNAMENT_ID }}
+          MODEL_TIER: ${{ vars.MODEL_TIER }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}

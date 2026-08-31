@@ -9,10 +9,17 @@ concurrency:
   cancel-in-progress: false
 
 
-# Daily job to run the simple forecast bot
+# Manual smoke test against the bot-testing-area tournament (7 questions, one
+# of each type, never scored). Also the rig for cost probes: set the MODEL_TIER
+# repository variable to "season" to measure what frontier models really cost
+# per question, then delete the variable to go back to the cheap tier.
 jobs:
   forecast_job:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
+    # A season-tier probe is slower than the test tier: five predictions per
+    # question instead of one. Twenty minutes is ample and stops a hung run
+    # holding the concurrency group for GitHub's six-hour default.
+    timeout-minutes: 20
     steps: # sets up the steps that will be run in order
       # setup repository with all necessary dependencies - keep as is
       - name: Check out repository
@@ -41,6 +48,11 @@ jobs:
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
+          # Repository VARIABLES (not secrets), and not visible to the process
+          # unless passed through here — an unset variable renders as an empty
+          # string, which main.py treats as "use the default".
+          MODEL_TIER: ${{ vars.MODEL_TIER }}
+          AIB_TOURNAMENT_ID: ${{ vars.AIB_TOURNAMENT_ID }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
