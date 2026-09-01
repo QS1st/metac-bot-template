@@ -289,6 +289,33 @@ def run():
     # Retries happen below the gate and do not re-acquire, so we need slack.
     check("the pace leaves headroom under the observed 20/min limit", rpm <= 18, True)
 
+    print("\n  -- patch and main.py agree (the cheap half of the CI check) --")
+    # CI already rebuilds main.py from the patch and diffs it, but that needs a
+    # network clone of upstream and only runs after a push. This does the half
+    # that needs neither: every replacement string in patch_phase1.py must
+    # appear verbatim in main.py.
+    #
+    # It exists because on 1 Sept 2026 a comment containing a backslash-n was
+    # embedded in a NON-raw """ string in the patch. Python turned it into a
+    # real newline, which split the comment and corrupted the regex beside it.
+    # The committed build had a SyntaxError. CI caught it; this catches it
+    # before the commit, and before a paid run is wasted on it.
+    patch_src = pathlib.Path(__file__).with_name("patch_phase1.py").read_text()
+    mismatched = []
+    replacements = 0
+    for node in ast.walk(ast.parse(patch_src)):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") in ("replace", "replace_all"):
+            try:
+                new_text = ast.literal_eval(node.args[1])
+                label = ast.literal_eval(node.args[-1])
+            except Exception:
+                continue
+            replacements += 1
+            if new_text not in src:
+                mismatched.append(label)
+    check("every patch replacement appears verbatim in main.py", mismatched, [])
+    check("the patch actually has replacements to check", replacements > 10, True)
+
     print("\n  -- the exit path is reachable --")
     # log_report_summary defaults to raise_errors=True and raises on ANY failed
     # question, which made everything after it — the banner and the season

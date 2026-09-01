@@ -167,10 +167,13 @@ replace(
     is the safe direction under a scoring rule this asymmetric.
     """
     text = reasoning or ""
-    # [^\S\n] is "horizontal whitespace": allows indentation and trailing
-    # spaces without letting the match run across lines.
+    # Spaces, tabs and a stray carriage return only. Deliberately NOT a class
+    # containing a newline escape: this same text is embedded in a non-raw
+    # string inside patch_phase1.py, where a backslash-n would become a real
+    # newline and silently corrupt both the comment and the pattern. It did,
+    # on 1 Sept 2026, and the build check caught it.
     flags = re.findall(
-        r"^[^\S\n]*AMBIGUITY[^\S\n]*:[^\S\n]*(HIGH|LOW)[^\S\n]*$",
+        r"^[ \\t\\r]*AMBIGUITY[ \\t\\r]*:[ \\t\\r]*(HIGH|LOW)[ \\t\\r]*$",
         text,
         re.IGNORECASE | re.MULTILINE,
     )

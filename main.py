@@ -1350,10 +1350,13 @@ def caps_for_reasoning(reasoning: str) -> tuple[float, float]:
     is the safe direction under a scoring rule this asymmetric.
     """
     text = reasoning or ""
-    # [^\S\n] is "horizontal whitespace": allows indentation and trailing
-    # spaces without letting the match run across lines.
+    # Spaces, tabs and a stray carriage return only. Deliberately NOT a class
+    # containing a newline escape: this same text is embedded in a non-raw
+    # string inside patch_phase1.py, where a backslash-n would become a real
+    # newline and silently corrupt both the comment and the pattern. It did,
+    # on 1 Sept 2026, and the build check caught it.
     flags = re.findall(
-        r"^[^\S\n]*AMBIGUITY[^\S\n]*:[^\S\n]*(HIGH|LOW)[^\S\n]*$",
+        r"^[ \t\r]*AMBIGUITY[ \t\r]*:[ \t\r]*(HIGH|LOW)[ \t\r]*$",
         text,
         re.IGNORECASE | re.MULTILINE,
     )
@@ -1428,6 +1431,10 @@ if __name__ == "__main__":
         research_reports_per_question=1,
         predictions_per_research_report=5,
         use_research_summary_to_forecast=False,
+        publish_reports_to_metaculus=publish_to_metaculus,
+        folder_to_save_reports_to=None,
+        skip_previously_forecasted_questions=True,
+        extra_metadata_in_explanation=True,
         # Found by tracing every outbound call on paper, 1 Sept 2026, rather
         # than by paying for another run. enable_summarize_research defaults to
         # True, so the SDK was making one summariser call per question whose
@@ -1439,10 +1446,6 @@ if __name__ == "__main__":
         # The only loss is a summary paragraph in the private note; the full
         # reasoning for every prediction is still there.
         enable_summarize_research=False,
-        publish_reports_to_metaculus=publish_to_metaculus,
-        folder_to_save_reports_to=None,
-        skip_previously_forecasted_questions=True,
-        extra_metadata_in_explanation=True,
         llms=build_llm_config(),
     )
     template_bot.predictions_per_research_report = predictions_per_report()
