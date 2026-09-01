@@ -51,7 +51,15 @@ jobs:
           # Repository VARIABLES (not secrets), and not visible to the process
           # unless passed through here — an unset variable renders as an empty
           # string, which main.py treats as "use the default".
-          MODEL_TIER: ${{ vars.MODEL_TIER }}
+          #
+          # TEST_MODEL_TIER, not MODEL_TIER, and that distinction matters.
+          # Both workflows originally read the same variable, so setting it to
+          # "season" for a cost probe here would ALSO have put the 10-minute
+          # scheduled tournament workflow on frontier models — about $0.50 a
+          # question, six batches to empty the account. Found by audit before
+          # the tournament workflow was ever enabled. A probe must not be able
+          # to reconfigure the live bot.
+          MODEL_TIER: ${{ vars.TEST_MODEL_TIER }}
           AIB_TOURNAMENT_ID: ${{ vars.AIB_TOURNAMENT_ID }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
