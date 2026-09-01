@@ -12,6 +12,164 @@ different bot.
 
 ---
 
+## 2026-09-01 (evening) — two independent audits, and three retractions
+
+Two auditors were briefed separately — one adversarial on cost and rate limits,
+one on correctness and silent failure — and told to assume the author was
+wrong. They were. Three things recorded in this file as working do not work as
+described. The retractions matter more than the fixes, so they come first.
+
+**RETRACTED: the multiple-choice floor never did anything.** `PredictedOptionList`
+carries a `model_validator` that runs on every construction and already clamps
+each option to `[0.01, 0.99]` — the identical value to our `MC_OPTION_FLOOR` —
+before `structure_output` returns. Ours could move a probability by at most
+~2e-4. The entry above dated 31 Aug claiming it prevented a −691 event is
+wrong; that protection was always in the SDK.
+
+Worse is why it survived. The unit tests fed `(name, probability)` tuples
+straight in, which the SDK never produces, and one case (`[("a",0.0),("b",0.0)]`)
+the SDK rejects outright on its sum check. The test agreed with itself and
+never asked what the library does to the value afterwards — **the exact failure
+this project diagnosed in the numeric path on 31 Aug and wrote up as a lesson.**
+Both the function and its tests are deleted, with the reasoning kept in place of
+the code so the retraction is visible to an inspector.
+
+**RETRACTED: the ambiguity cap was close to inert.** `caps_for_reasoning` used
+to require HIGH present and LOW absent anywhere in the text. But the prompt
+hands the model both literal strings, and models routinely restate an
+instruction before answering it — "I must output either AMBIGUITY: LOW or
+AMBIGUITY: HIGH … AMBIGUITY: HIGH". Both present meant normal caps, so the
+guard failed OPEN on precisely the questions it exists for, and the old test
+asserted that as correct. It now matches a flag on its own line and takes the
+last one, which separates the restated instruction from the answer. Six tests
+cover the realistic patterns.
+
+**RETRACTED: the season-rollover message was unreachable.** Found independently
+by both auditors. `log_report_summary` defaults to `raise_errors=True` and
+raises on any failed question, so the banner and the `SEASON_STALE_MESSAGE`
+written that morning never executed on a run with a single failure — which,
+on recent evidence, is most runs. Now called with `raise_errors=False` and the
+exit code decided explicitly.
+
+The bar for a red run is deliberately **not** "any question failed". At a run
+every ten minutes, one flaky question turning everything red trains whoever is
+watching to ignore red — and red is what the rollover guard depends on being
+noticed. Partial failure now warns; only a run that achieved nothing, or a
+stale season, fails the workflow.
+
+**Rate limiting, corrected twice over.**
+
+- **Retries live below the gate.** `structure_output` defaults to
+  `allowed_tries=3`, and a parser passed as a bare string is wrapped in a
+  `GeneralLlm` with `_DEFAULT_ALLOWED_TRIES=2`. One trip through our limiter
+  could be **six** requests on the wire, invisible to the bucket. That is a
+  better explanation for 87 rejections against 45 acquisitions than the
+  burstiness first blamed. The parser is now an explicit `GeneralLlm` with
+  `allowed_tries=2`, and `structure_output`'s own loop is pinned at 1.
+- **`capacity` is the burst size, not the budget.** At `capacity=15` the library
+  fires a full minute's allowance in one instant, then stalls 60 seconds —
+  `RefreshingBucketRateLimiter` refills to FULL once emptied. The 60-second
+  average held while the instantaneous rate was ~15/second: the very burst shape
+  that triggered the throttle. Simulated against the library's own algorithm,
+  old versus new: 15 sends at t=0 becomes one send every 6 seconds, worst
+  60-second window 10 against a limit of 20.
+- **`PER_MODEL_RPM` 15 → 10, `PER_MODEL_BURST` = 1.** Half the observed limit, so
+  even every call retrying once stays inside it. 45 calls take 264 seconds
+  rather than 120. Time is the thing we have; credit is not.
+
+**A probe can no longer reconfigure the live bot.** Both workflows read the same
+`MODEL_TIER` variable, so setting it to `season` for a cost probe would also
+have put the 10-minute scheduled tournament on frontier models at ~$0.50 a
+question. `test_bot.yaml` now reads `TEST_MODEL_TIER`. Caught before the
+tournament workflow was ever enabled.
+
+**An alarm for empty research.** Nothing checked that research returned
+anything. If Sonar returns an empty string rather than raising, the prompt
+reads "Your research assistant says:" followed by nothing and the bot forecasts
+from model weights — 3.6× Brier by Metaculus's own evidence — then exits green.
+Now logged as an ERROR. Deliberately not raised: discarding the sample could
+forfeit the question, and whether an unresearched forecast beats no forecast is
+a judgement about the scoring rule that is recorded as open rather than settled
+quietly.
+
+**Also corrected:** an earlier entry said 13 questions were forfeited out of 9.
+That counted log lines, not questions, and 13 of 9 is impossible. The measured
+trial-tier cost is ~$0.019 a prediction, so a 60-question MiniBench round is
+about $5.70 — not the "few dollars" estimated from a price ratio.
+
+67 unit tests. Still open and NOT fixed here, recorded so they are not lost:
+the multiple-choice prompt still invites 0% options that the SDK's validator
+then rejects; `SEASON_GUARD_DATE` is one-shot and the Winter 2027 rollover has
+no alarm; group questions unpack into N independent questions, which no cost
+estimate models.
+
+## 2026-09-01 (later) — a wasted call, found by reading instead of paying
+
+Two paid runs had found two errors that were both visible in the source. So
+before spending again, every outbound call was traced on paper. That found a
+third error, at no cost.
+
+- **`enable_summarize_research=False`.** The SDK summarises research on every
+  question — the flag defaults to True — and we then discard the result:
+  `forecast_bot.py` line 469 forecasts from
+  `summary_report if self.use_research_summary_to_forecast else research`, and
+  ours is False. So every question was paying for a summary that was written,
+  logged, and ignored. Worse, it was **un-paced** and pointed at the same model
+  as the parser, so that model was taking six calls a question against a bucket
+  sized for five. It is also the source of the "Could not summarize research"
+  warnings. The only thing lost is a summary paragraph in the private note; the
+  full reasoning for every prediction is unaffected.
+- **Two tests** pin both summariser settings so neither drifts back on.
+
+The full call inventory now reads, per question: one research call (Sonar, its
+own model), five forecasts (paced, bucket A), five parses (paced, bucket B),
+and nothing else. Each paced model sees exactly 15 a minute against a limit of
+20, and the two buckets sit on genuinely different models.
+
+Also checked and recorded, since it had never been examined: the repository is
+public and every workflow uses a standard runner, so GitHub Actions is free
+with no minute cap — our ~4,300 runs a month cost nothing. GitHub's Actions
+terms permit use for "production… of the software project associated with the
+repository", which is what this is, and Metaculus ships the template with a
+scheduled workflow. Noted honestly: we run a 10-minute cron where the template
+ships 20, which is twice the sanctioned burden.
+
+## 2026-09-01 — the second half of the traffic, which the first fix ignored
+
+The trial tier ran and was still rate-limited: 63 rejections, this time on
+`new-account-rpm/google/gemini-3.6-flash`. My error, and an instructive one.
+
+It did improve on the season run — 29 predictions landed against 18, four
+question errors against nineteen, five forfeitures against thirteen — so the
+default-model bucket was working. It just wasn't the whole picture.
+
+**Two mistakes, one cause.** I gated the default model and left `structure_output`
+un-paced. Parsing runs **once per prediction**, so it is not a side channel: it
+is the same call volume as forecasting. Then I compounded it by putting the
+trial tier's default, parser and summariser all on Gemini 3.6 Flash — and since
+OpenRouter's throttle is keyed on the *model*, all three roles shared one
+20/minute budget. Pacing one of them to 15/min while another spends the same
+allowance freely achieves nothing. The log said so plainly: "Could not
+summarize research… rate limit exceeded".
+
+- **A second bucket, for the parser**, and a `_structure_output_paced` wrapper
+  so all four parse sites go through it. One bucket per model, not one per bot.
+- **Trial's parser and summariser moved to `openai/gpt-oss-120b`** —
+  $0.037/$0.17 per million, 20x cheaper again, 20 serving endpoints, verified
+  live. Now the two buckets map onto two genuinely separate budgets, which is
+  what makes them mean anything. The season tier already had this shape by
+  accident; it is now deliberate, and tested.
+- **`PER_MODEL_RPM` replaces `DEFAULT_MODEL_RPM`.** The old name described the
+  limit as belonging to one model, which is exactly the misconception that
+  caused this.
+- **A near-miss worth recording.** Rewriting `await structure_output(` to the
+  paced wrapper also rewrote the wrapper's own body into a call to itself. The
+  patch anchor is now `= await structure_output(`, matching the four
+  assignments and never the helper's `return`, with a comment saying why.
+- **Six more tests**, including the two that would have caught the original
+  error: that no un-gated parse sites remain, and that default and parser are
+  different models at both paid tiers.
+
 ## 2026-08-31 (night, last) — a trial tier, because frontier models are ours to pay for
 
 The measured cost above makes the seasonal configuration unaffordable for any

@@ -41,7 +41,6 @@ def load(*names, consts=()):
     )
     module.BINARY_FLOOR, module.BINARY_CEILING = 0.02, 0.98
     module.AMBIGUOUS_FLOOR, module.AMBIGUOUS_CEILING = 0.10, 0.90
-    module.MC_OPTION_FLOOR = 0.01
 
     wanted = set(names)
     wanted_consts = set(consts)
@@ -88,9 +87,7 @@ def raises(fn, *args):
 
 
 def run():
-    sorted_percentiles, caps, floor_mc, _ = load(
-        "_sorted_percentiles", "caps_for_reasoning", "floor_and_renormalise"
-    )
+    sorted_percentiles, caps, _ = load("_sorted_percentiles", "caps_for_reasoning")
     failures = []
 
     def check(label, got, expected):
@@ -140,29 +137,36 @@ def run():
     check("AMBIGUITY: HIGH tightens the caps", caps("blah\nAMBIGUITY: HIGH\nblah"), TIGHT)
     check("lower case is accepted", caps("ambiguity: high"), TIGHT)
     check("odd spacing is accepted", caps("AMBIGUITY  :   HIGH"), TIGHT)
-    check("contradictory HIGH and LOW falls back to normal",
+    # CHANGED 1 Sept 2026 after audit. Both flags on ONE line is prose, not an
+    # answer, so it must not tighten — but the old code also fell back whenever
+    # the two strings appeared anywhere, which is what the model does when it
+    # restates the instruction. See the two cases below.
+    check("both flags inline, no answer line, stays normal",
           caps("AMBIGUITY: HIGH ... later ... AMBIGUITY: LOW"), NORMAL)
+    check("restating the instruction then answering HIGH tightens",
+          caps("I must output either AMBIGUITY: LOW or AMBIGUITY: HIGH.\n"
+               "Reasoning here.\nAMBIGUITY: HIGH"), TIGHT)
+    check("restating the instruction then answering LOW stays normal",
+          caps("Options are AMBIGUITY: LOW or AMBIGUITY: HIGH.\n"
+               "Reasoning.\nAMBIGUITY: LOW"), NORMAL)
+    check("the LAST flag line wins, not the first",
+          caps("AMBIGUITY: LOW\nOn reflection:\nAMBIGUITY: HIGH"), TIGHT)
+    check("indented flag lines still count",
+          caps("blah\n    AMBIGUITY: HIGH  "), TIGHT)
+    check("a flag buried mid-sentence is not an answer",
+          caps("the AMBIGUITY: HIGH marker would go here"), NORMAL)
     check("the bare word does not trigger", caps("there is ambiguity here"), NORMAL)
     check("'not ambiguous' does not trigger", caps("this is not ambiguous at all"), NORMAL)
 
-    print("\n  -- multiple-choice floor --")
-    # A 0% option that resolves scores about -691. Flooring costs ~1%.
-    out = floor_mc([("a", 0.0), ("b", 1.0)])
-    check("a 0% option is lifted off the floor", all(p >= 0.01 for _, p in out), True)
-    approx("probabilities still sum to 1", [round(sum(p for _, p in out), 9)], [1.0])
-    check("option names are preserved in order", [n for n, _ in out], ["a", "b"])
-
-    out = floor_mc([("a", 0.25), ("b", 0.25), ("c", 0.25), ("d", 0.25)])
-    approx("an already-valid distribution is left alone", [p for _, p in out], [0.25] * 4)
-
-    out = floor_mc([("a", 0.0), ("b", 0.0), ("c", 1.0)])
-    approx("sum is 1 after flooring several zeros", [round(sum(p for _, p in out), 9)], [1.0])
-    check("the confident option stays the largest", max(out, key=lambda x: x[1])[0], "c")
-
-    out = floor_mc([("a", 0.0), ("b", 0.0)])
-    approx("all-zero input becomes uniform, not a divide-by-zero", [p for _, p in out], [0.5, 0.5])
-
-    check("empty list survives", floor_mc([]), [])
+    print("\n  -- multiple-choice floor: REMOVED, and why --")
+    # The floor_and_renormalise tests used to live here. They passed while the
+    # code did nothing, because they fed (name, probability) tuples straight in
+    # and the SDK never sees data in that form. PredictedOptionList's validator
+    # already clamps to [0.01, 0.99] on construction. Deleting the tests with
+    # the code, and asserting the absence, so it cannot quietly return.
+    check("floor_and_renormalise is gone from main.py",
+          "def floor_and_renormalise" in pathlib.Path(__file__).with_name("main.py").read_text(),
+          False)
 
     print("\n  -- the trial tier --")
     mods = load(consts=("TRIAL_MODELS", "SEASON_MODELS", "TOURNAMENT_READY_TIERS",
@@ -189,6 +193,8 @@ def run():
     # "every default-model call goes through the gate" — which is a property of
     # the file, and stays true only if something keeps checking it.
     src = pathlib.Path(__file__).with_name("main.py").read_text()
+    mods2 = load(consts=("PER_MODEL_RPM", "PER_MODEL_BURST", "PARSER_ALLOWED_TRIES",
+                         "STRUCTURE_OUTPUT_ALLOWED_TRIES"))[-1]
     ungated = _re.findall(
         r"\n {8}\w[\w.]* = await self\.get_llm\(\"default\", \"llm\"\)\.invoke", src
     )
@@ -209,18 +215,90 @@ def run():
         True,
     )
     check(
-        "the limiter is built from DEFAULT_MODEL_RPM, not a loose number",
+        "both limiters are built from the named constants, not loose numbers",
+        len(
+            _re.findall(
+                r"capacity=PER_MODEL_BURST,\s*refresh_rate=PER_MODEL_RPM / 60", src
+            )
+        ),
+        2,
+    )
+    # capacity IS the burst size. At capacity=PER_MODEL_RPM the library fires a
+    # whole minute's allowance in one instant and then stalls 60s — the exact
+    # burst shape that triggered OpenRouter's throttle. Simulated in the 1 Sept
+    # audit. Capacity 1 means one request per interval and no burst at all.
+    check("the bucket cannot burst", mods2.PER_MODEL_BURST, 1)
+    # Parsing runs once per prediction, so it is the same volume as forecasting.
+    # Gating only the default model is what let the first trial run fail.
+    check(
+        "parser calls are gated too, at all four sites",
+        len(_re.findall(r"= await self\._structure_output_paced\(", src)),
+        4,
+    )
+    check(
+        "no un-gated structure_output call sites remain",
+        _re.findall(r"= await structure_output\(", src),
+        [],
+    )
+    check(
+        "the parser gate acquires BEFORE it parses",
         bool(
             _re.search(
-                r"capacity=DEFAULT_MODEL_RPM,\s*refresh_rate=DEFAULT_MODEL_RPM / 60", src
+                r"_parser_model_limiter\.wait_till_able_to_acquire_resources\(1\)[\s\S]{0,600}?return await structure_output\(",
+                src,
             )
         ),
         True,
     )
-    rpm = load(consts=("DEFAULT_MODEL_RPM",))[-1].DEFAULT_MODEL_RPM
+    # Retries live BELOW the gate and never re-acquire, so the limiter cannot
+    # see them. These two constants are the only thing bounding the multiplier.
+    check("structure_output's own retry loop is pinned, not inherited",
+          bool(_re.search(r'kwargs\.setdefault\("allowed_tries", STRUCTURE_OUTPUT_ALLOWED_TRIES\)', src)), True)
+    check("the parser is a GeneralLlm so allowed_tries can be set",
+          bool(_re.search(r"allowed_tries=PARSER_ALLOWED_TRIES", src)), True)
+    worst_case = mods2.PARSER_ALLOWED_TRIES * mods2.STRUCTURE_OUTPUT_ALLOWED_TRIES
+    check("worst-case wire requests per acquisition stay within the limit",
+          mods2.PER_MODEL_RPM * worst_case <= 20, True)
+    # The gate is worthless if both roles land on one model: OpenRouter's
+    # throttle is per model, so they would share one real budget.
+    check(
+        "trial keeps default and parser on DIFFERENT models",
+        mods.TRIAL_MODELS["default"] != mods.TRIAL_MODELS["parser"],
+        True,
+    )
+    # The SDK summarises research by default and we throw the summary away
+    # (use_research_summary_to_forecast is False). Left on, it is one un-gated
+    # call per question against the parser model's own budget.
+    check(
+        "the unused research summariser stays switched off",
+        bool(_re.search(r"enable_summarize_research=False", src)),
+        True,
+    )
+    check(
+        "and we are not paying to forecast from a summary either",
+        bool(_re.search(r"use_research_summary_to_forecast=False", src)),
+        True,
+    )
+    check(
+        "season keeps default and parser on DIFFERENT models",
+        mods.SEASON_MODELS["default"] != mods.SEASON_MODELS["parser"],
+        True,
+    )
+    rpm = mods2.PER_MODEL_RPM
     # OpenRouter's observed new-account limit on the default model is 20/min.
     # Retries happen below the gate and do not re-acquire, so we need slack.
     check("the pace leaves headroom under the observed 20/min limit", rpm <= 18, True)
+
+    print("\n  -- the exit path is reachable --")
+    # log_report_summary defaults to raise_errors=True and raises on ANY failed
+    # question, which made everything after it — the banner and the season
+    # rollover message — dead code. Found by two independent auditors, 1 Sept.
+    check("log_report_summary is called with raise_errors=False",
+          bool(_re.search(r"log_report_summary\(forecast_reports, raise_errors=False\)", src)), True)
+    check("we still fail the run when nothing was submitted",
+          bool(_re.search(r"REFUSING TO PASS", src)), True)
+    check("the season message is still raised",
+          bool(_re.search(r"raise SystemExit\(SEASON_STALE_MESSAGE\)", src)), True)
 
     print("\n  -- season rollover guard --")
     # The values come out of main.py rather than being restated here, so this

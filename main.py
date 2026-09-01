@@ -88,19 +88,25 @@ BINARY_CEILING = 0.98
 AMBIGUOUS_FLOOR = 0.10
 AMBIGUOUS_CEILING = 0.90
 
-# MULTIPLE-CHOICE FLOOR.
+# MULTIPLE-CHOICE FLOOR — REMOVED 1 Sept 2026. Kept as a note, not as code.
 #
-# The upstream parser is instructed: "you may sometimes need to parse a 0%
-# probability. Please do not skip options with 0%." If a 0% option then
-# RESOLVES, the peer score for that question is the floor — about -691, against
-# typical per-question scores of ±10-30. One such event erases roughly thirty
-# good questions, and because the prize is max(total, 0) squared it can take
-# the whole season to nothing.
+# We floored multiple-choice options at 0.01 and renormalised, on the reasoning
+# that a 0% option which then RESOLVES scores about -691 and erases thirty good
+# questions. The reasoning about the scoring rule was right. The code was
+# pointless: PredictedOptionList carries a model_validator that runs on every
+# construction and already clamps each option to [0.01, 0.99] — the identical
+# value — before structure_output hands it back. Ours could only ever move a
+# probability by about 2e-4.
 #
-# Binary forecasts were floored at 0.02 on day one. Multiple choice — the type
-# where Metaculus's own analysis says bots lose most ground to humans — had no
-# floor at all until an audit found it on 31 Aug 2026.
-MC_OPTION_FLOOR = 0.01
+# It survived a week because the unit tests fed it (name, probability) tuples
+# directly, bypassing the SDK model. Data the SDK cannot produce, and in one
+# case actively rejects: an all-zero list raises on the sum check. The test
+# agreed with itself and never asked what the SDK does to the value afterwards
+# — the very failure this project had already diagnosed once, in the numeric
+# path, and written up as a lesson.
+#
+# Recorded rather than deleted silently, because the disclosure document should
+# show the retraction as well as the change.
 
 # Number of independent forecasts aggregated per question. STRONG evidence for
 # ensembling (86% of winners aggregate). Phase 2 will widen this across model
@@ -125,13 +131,16 @@ RESEARCH_REPORTS_PER_QUESTION = 1
 # starts returning "No endpoints found", re-check that endpoint first.
 # -----------------------------------------------------------------------------
 
-# THREE TIERS.
+# FOUR TIERS.
 #
 #   "free"   — :free models, zero balance. KEPT FOR REFERENCE, NOT RECOMMENDED.
 #              Four runs died on it across three providers. Every :free model
 #              has exactly ONE serving endpoint on one provider's shared pool,
 #              so there is no failover and the pool rate-limits under any load.
-#   "test"   — cheap paid models. What we develop against.
+#   "test"   — cheap paid models, ONE prediction a question. Development only.
+#   "trial"  — cheap paid models, FIVE predictions and live research. A real
+#              forecasting configuration we can afford to fund ourselves, for
+#              scored MiniBench rounds before the Metaculus credits arrive.
 #   "season" — frontier models, on Metaculus's credits, for the tournament.
 #
 # The difference is structural, not a matter of picking a better free model
@@ -150,7 +159,9 @@ RESEARCH_REPORTS_PER_QUESTION = 1
 # AIB_TOURNAMENT_ID further down. Set a GitHub repository variable named
 # MODEL_TIER, and delete it to fall back to the default below. Note this does
 # NOT weaken assert_tier_matches_mode: a scored tournament still refuses to run
-# on anything but "season", wherever the value came from.
+# on anything outside TOURNAMENT_READY_TIERS, wherever the value came from.
+# (Changing the variable needs a GitHub password re-prompt, so it is a
+# deliberate human act by construction.)
 VALID_MODEL_TIERS = ("free", "test", "trial", "season")
 MODEL_TIER = (os.environ.get("MODEL_TIER") or "test").strip().lower()
 if MODEL_TIER not in VALID_MODEL_TIERS:
@@ -280,10 +291,18 @@ SEASON_MODELS = {
 #
 # Research stays on Sonar. Cutting search is the one economy that reliably
 # loses more than it saves.
+# Parser and summariser are a DIFFERENT model from the default, and that is the
+# whole point rather than a detail. OpenRouter's new-account throttle is per
+# model, so putting every role on one model makes them share one 20/minute
+# budget. The first trial run did exactly that — 63 rejections, including
+# "Could not summarize research" — because pacing the default model to 15/min
+# is worthless if the parser is spending the same allowance un-paced.
+# gpt-oss-120b is $0.037/$0.17 per million, 20x cheaper again, and has 20
+# serving endpoints. Both prices verified live against /api/v1/models.
 TRIAL_MODELS = {
     "default": "openrouter/google/gemini-3.6-flash",
-    "summarizer": "openrouter/google/gemini-3.6-flash",
-    "parser": "openrouter/google/gemini-3.6-flash",
+    "summarizer": "openrouter/openai/gpt-oss-120b",
+    "parser": "openrouter/openai/gpt-oss-120b",
     "researcher": "openrouter/perplexity/sonar",
 }
 
@@ -309,9 +328,45 @@ TRIAL_MODELS = {
 # shape: a minute's worth may burst, then the bucket refills over the next
 # minute before more is allowed.
 #
+# ONE BUCKET PER MODEL, not one per bot. The throttle is keyed on the model, so
+# there are two buckets below: one for the default model and one for the
+# parser. Parsing runs once per prediction, so it generates the SAME volume as
+# forecasting — gating only the default model, as the first version of this did,
+# leaves half the traffic un-paced. The two roles must also BE different models,
+# or the two buckets simply share one real budget and neither is honoured.
+#
 # Cost of the pacing: a five-question tournament pass is 25 default calls, so
-# under two minutes of the 90-minute window. Not the binding constraint.
-DEFAULT_MODEL_RPM = 15
+# under three minutes of the 90-minute window. Not the binding constraint.
+#
+# REVISED 1 Sept 2026 after audit, from 15 to 10. Two reasons, both measured
+# rather than assumed:
+#
+#   1. Retries live BELOW this gate and never re-acquire, so they are invisible
+#      to the bucket. Capping the parser at PARSER_ALLOWED_TRIES brings the
+#      worst-case multiplier down from 6 to 2, but 2 x 15 = 30 still breaches a
+#      limit of 20. At 10 a minute, even every single call retrying once stays
+#      inside 20. Headroom of 100% is the point: we are buying certainty with
+#      time, and time is the thing we have.
+#   2. Capacity is now 1, not PER_MODEL_RPM. An audit simulated the library's
+#      actual behaviour: with capacity=15 the bucket fires all fifteen requests
+#      in the same instant and then stalls for a full 60 seconds, because
+#      RefreshingBucketRateLimiter refills to FULL once emptied rather than one
+#      unit at a time. The 60-second average held while the instantaneous rate
+#      was ~15 per second — the very burst shape that triggered the throttle.
+#      Capacity 1 gives one request every six seconds and no burst at all.
+PER_MODEL_RPM = 10
+PER_MODEL_BURST = 1
+
+# Retries inside the parser. The SDK default is 2, and structure_output wraps
+# it in its own loop, so this is one half of a multiplier we cannot see from
+# the rate limiter. One retry is worth having — a lost parse costs a whole
+# sample, and three lost samples forfeit the question.
+PARSER_ALLOWED_TRIES = 2
+
+# structure_output's own outer retry loop, which wraps the parser LLM's. The
+# SDK default is 3; combined with PARSER_ALLOWED_TRIES that is a 6x multiplier
+# on every acquisition. At 1 the worst case is 2, which the 10/min pace covers.
+STRUCTURE_OUTPUT_ALLOWED_TRIES = 1
 
 # Phase 2 ensemble members, kept here so the intent is recorded even though
 # nothing reads this yet. Chosen across four families deliberately: the
@@ -448,7 +503,20 @@ def build_llm_config():
             allowed_tries=LLM_ALLOWED_TRIES,
         ),
         "summarizer": chosen["summarizer"],
-        "parser": chosen["parser"],
+        # The parser is a GeneralLlm rather than a bare model string so we can
+        # set allowed_tries. Passed as a string, the SDK wraps it in a
+        # GeneralLlm with _DEFAULT_ALLOWED_TRIES = 2, and structure_output adds
+        # its own outer loop of allowed_tries=3 — so ONE trip through our rate
+        # limiter could become SIX requests on the wire. Retries happen below
+        # the gate and never re-acquire, so the limiter cannot see them. Audit,
+        # 1 Sept 2026: this is the better explanation for 87 rejections against
+        # 45 acquisitions than the burstiness we first blamed.
+        "parser": GeneralLlm(
+            model=chosen["parser"],
+            temperature=0.0,
+            timeout=LLM_TIMEOUT_SECONDS,
+            allowed_tries=PARSER_ALLOWED_TRIES,
+        ),
         "researcher": chosen["researcher"],
     }
 
@@ -640,10 +708,13 @@ class SummerTemplateBot2026(ForecastBot):
     # list can differ by a digit.
     _structure_output_validation_samples = 1
 
-    # One bucket shared by every question in the run, because OpenRouter's
-    # limit is per model per account, not per question. See DEFAULT_MODEL_RPM.
+    # One bucket per MODEL, shared by every question in the run, because
+    # OpenRouter's throttle is per model per account. See PER_MODEL_RPM.
     _default_model_limiter = RefreshingBucketRateLimiter(
-        capacity=DEFAULT_MODEL_RPM, refresh_rate=DEFAULT_MODEL_RPM / 60
+        capacity=PER_MODEL_BURST, refresh_rate=PER_MODEL_RPM / 60
+    )
+    _parser_model_limiter = RefreshingBucketRateLimiter(
+        capacity=PER_MODEL_BURST, refresh_rate=PER_MODEL_RPM / 60
     )
 
     async def _invoke_default_llm(self, prompt: str) -> str:
@@ -656,6 +727,22 @@ class SummerTemplateBot2026(ForecastBot):
         """
         await self._default_model_limiter.wait_till_able_to_acquire_resources(1)
         return await self.get_llm("default", "llm").invoke(prompt)
+
+    async def _structure_output_paced(self, *args, **kwargs):
+        """structure_output, paced against the parser model's own throttle.
+
+        Parsing happens once per prediction, so it is not a minor side channel:
+        it is the same call volume as forecasting. The first rate-limited run
+        paced the default model and left this untouched, which is why it still
+        failed.
+        """
+        await self._parser_model_limiter.wait_till_able_to_acquire_resources(1)
+        # allowed_tries is structure_output's OWN outer retry loop, separate
+        # from the parser LLM's. Left at its default of 3 it multiplies with
+        # PARSER_ALLOWED_TRIES; stated here so the worst case is visible in one
+        # place rather than inherited from a default we did not choose.
+        kwargs.setdefault("allowed_tries", STRUCTURE_OUTPUT_ALLOWED_TRIES)
+        return await structure_output(*args, **kwargs)
 
     ##################################### RESEARCH #####################################
 
@@ -706,6 +793,27 @@ class SummerTemplateBot2026(ForecastBot):
                 research = ""
             else:
                 research = await self.get_llm("researcher", "llm").invoke(prompt)
+            # Nothing anywhere checked that research actually returned
+            # anything. If Sonar returns an empty string or a refusal rather
+            # than raising, the prompt reads "Your research assistant says:"
+            # followed by nothing, the bot forecasts from model weights against
+            # a training cutoff, publishes, and exits green. Metaculus's own
+            # evidence puts removing search at 3.6x Brier.
+            #
+            # Logged, not raised — deliberately, for now. Raising would discard
+            # the sample, and three discarded samples forfeit the question, so
+            # the fix could cost more than the fault. Whether an unresearched
+            # forecast is worse than no forecast is a judgement about the
+            # scoring rule, and it is recorded as an open decision rather than
+            # settled quietly here.
+            if self.get_llm("researcher") not in (None, "", "None", "no_research"):
+                if len(research.strip()) < 200:
+                    logger.error(
+                        "RESEARCH LOOKS EMPTY for %s (%d chars). This forecast is "
+                        "coming from model weights, not from search.",
+                        question.page_url,
+                        len(research.strip()),
+                    )
             logger.info(f"Found Research for URL {question.page_url}:\n{research}")
             return research
 
@@ -787,7 +895,7 @@ class SummerTemplateBot2026(ForecastBot):
     ) -> ReasonedPrediction[float]:
         reasoning = await self._invoke_default_llm(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
-        binary_prediction: BinaryPrediction = await structure_output(
+        binary_prediction: BinaryPrediction = await self._structure_output_paced(
             reasoning,
             BinaryPrediction,
             model=self.get_llm("parser", "llm"),
@@ -862,7 +970,7 @@ class SummerTemplateBot2026(ForecastBot):
         )
         reasoning = await self._invoke_default_llm(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
-        predicted_option_list: PredictedOptionList = await structure_output(
+        predicted_option_list: PredictedOptionList = await self._structure_output_paced(
             text_to_structure=reasoning,
             output_type=PredictedOptionList,
             model=self.get_llm("parser", "llm"),
@@ -870,14 +978,20 @@ class SummerTemplateBot2026(ForecastBot):
             additional_instructions=parsing_instructions,
         )
 
-        _pairs = [
-            (o.option_name, o.probability)
-            for o in predicted_option_list.predicted_options
-        ]
-        for _opt, (_, _p) in zip(
-            predicted_option_list.predicted_options, floor_and_renormalise(_pairs)
-        ):
-            _opt.probability = _p
+        # NO FLOOR APPLIED HERE, DELIBERATELY. We used to floor and renormalise
+        # the options at MC_OPTION_FLOOR (0.01). An audit on 1 Sept 2026 showed
+        # it was dead code: PredictedOptionList has a model_validator that runs
+        # on every construction and already clamps every option to
+        # [0.01, 0.99] — the same value — before structure_output returns it.
+        # Our version could only ever move a probability by ~2e-4. It read like
+        # protection and provided none, which is worse than nothing.
+        #
+        # The real multiple-choice risk is the opposite one and is NOT handled:
+        # that same validator RAISES if the parsed probabilities sum outside
+        # [0.99, 1.01], or if normalising moves any option by more than 0.05.
+        # Three such rejections out of five samples forfeit the question. That
+        # is a prompt problem, not a post-processing one, and is logged as
+        # follow-up work rather than guessed at here.
 
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}."
@@ -967,7 +1081,7 @@ class SummerTemplateBot2026(ForecastBot):
             - Turn any values that are in scientific notation into regular numbers.
             """
         )
-        percentile_list: list[Percentile] = await structure_output(
+        percentile_list: list[Percentile] = await self._structure_output_paced(
             reasoning,
             list[Percentile],
             model=self.get_llm("parser", "llm"),
@@ -1058,7 +1172,7 @@ class SummerTemplateBot2026(ForecastBot):
             - If percentiles are not explicitly given (e.g. only a single value is given) please don't return a parsed output, but rather indicate that the answer is not explicitly given in the text.
             """
         )
-        date_percentile_list: list[DatePercentile] = await structure_output(
+        date_percentile_list: list[DatePercentile] = await self._structure_output_paced(
             reasoning,
             list[DatePercentile],
             model=self.get_llm("parser", "llm"),
@@ -1218,75 +1332,41 @@ def caps_for_reasoning(reasoning: str) -> tuple[float, float]:
     """Return (floor, ceiling) for a binary forecast, tightened if the model
     flagged the resolution criteria as genuinely ambiguous.
 
-    Fails SAFE: a missing, malformed or contradictory flag yields the normal
-    caps, so a parsing problem can never silently make the bot MORE confident.
+    Matches only a flag on its OWN LINE, and takes the LAST one.
+
+    The first version searched the whole text for HIGH and for LOW, and fell
+    back to the normal caps whenever both appeared. An audit on 1 Sept 2026
+    showed that made the guard almost inert: the prompt itself hands the model
+    both literal strings (see the binary prompt), and models routinely restate
+    the instruction before answering it — "I must output either AMBIGUITY: LOW
+    or AMBIGUITY: HIGH ... AMBIGUITY: HIGH". Both strings present meant normal
+    caps, so the guard failed OPEN on exactly the questions it exists for. The
+    old unit test asserted that behaviour as correct, which locked it in.
+
+    Line anchoring separates the restated instruction from the answer, and
+    last-match-wins takes the model's conclusion rather than its preamble.
+    Still fails safe: no flag at all yields the normal caps, and a model that
+    only ever echoes the instruction ends on HIGH, which tightens. Tightening
+    is the safe direction under a scoring rule this asymmetric.
     """
     text = reasoning or ""
-    high = re.search(r"AMBIGUITY\s*:\s*HIGH", text, re.IGNORECASE) is not None
-    low = re.search(r"AMBIGUITY\s*:\s*LOW", text, re.IGNORECASE) is not None
-
-    if high and not low:
+    # [^\S\n] is "horizontal whitespace": allows indentation and trailing
+    # spaces without letting the match run across lines.
+    flags = re.findall(
+        r"^[^\S\n]*AMBIGUITY[^\S\n]*:[^\S\n]*(HIGH|LOW)[^\S\n]*$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if flags and flags[-1].upper() == "HIGH":
         logger.info(
             "Resolution criteria flagged AMBIGUOUS — capping to %.2f-%.2f",
             AMBIGUOUS_FLOOR,
             AMBIGUOUS_CEILING,
         )
         return AMBIGUOUS_FLOOR, AMBIGUOUS_CEILING
-    if high and low:
-        # Both present: the model contradicted itself, so we cannot trust the
-        # flag. Treat as not-ambiguous rather than guessing, but say so.
-        logger.warning(
-            "Both AMBIGUITY: HIGH and LOW present in reasoning — using normal caps"
-        )
+    if not flags:
+        logger.warning("No AMBIGUITY flag found on its own line — using normal caps")
     return BINARY_FLOOR, BINARY_CEILING
-
-
-def floor_and_renormalise(option_probabilities):
-    """Apply a floor to every multiple-choice option, then renormalise to 1.
-
-    Takes and returns a list of (name, probability) pairs.
-
-    A 0% option that resolves scores about -691 — one of those erases thirty
-    good questions. Flooring costs almost nothing: lifting an option from 0%
-    to 1% moves the others by roughly a percent in total.
-
-    Renormalising afterwards is not optional. Metaculus validates that the
-    options sum to 1, and flooring necessarily pushes the sum above it.
-    """
-    if not option_probabilities:
-        return []
-    count = len(option_probabilities)
-    uniform = [(name, 1.0 / count) for name, _ in option_probabilities]
-
-    # Too many options for the floor to fit inside a unit total.
-    if MC_OPTION_FLOOR * count >= 1.0:
-        return uniform
-
-    raw = [max(0.0, float(p)) for _, p in option_probabilities]
-    total = sum(raw)
-    if total <= 0:
-        logger.warning("Multiple-choice probabilities summed to %s — using uniform", total)
-        return uniform
-    normalised = [p / total for p in raw]
-
-    # Naive flooring then renormalising does NOT work: scaling the whole vector
-    # back to 1 pushes the floored options straight back under the floor.
-    # Instead, pin the low options AT the floor and share what is left among
-    # the rest, in proportion to their existing weights.
-    low = [i for i, p in enumerate(normalised) if p < MC_OPTION_FLOOR]
-    if not low:
-        return [(name, p) for (name, _), p in zip(option_probabilities, normalised)]
-
-    remaining = 1.0 - MC_OPTION_FLOOR * len(low)
-    high_total = sum(p for i, p in enumerate(normalised) if i not in set(low))
-    if high_total <= 0:
-        return uniform
-
-    out = []
-    low_set = set(low)
-    for i, ((name, _), p) in enumerate(zip(option_probabilities, normalised)):
-        out.append((name, MC_OPTION_FLOOR if i in low_set else p / high_total * remaining))
-    return out
 
 
 def _sorted_percentiles(percentile_list):
@@ -1348,6 +1428,17 @@ if __name__ == "__main__":
         research_reports_per_question=1,
         predictions_per_research_report=5,
         use_research_summary_to_forecast=False,
+        # Found by tracing every outbound call on paper, 1 Sept 2026, rather
+        # than by paying for another run. enable_summarize_research defaults to
+        # True, so the SDK was making one summariser call per question whose
+        # output we then discarded: line 469 of forecast_bot.py forecasts from
+        # `summary_report if self.use_research_summary_to_forecast else
+        # research`, and ours is False. It cost money, it spent rate-limit
+        # budget on the same model as the parser, and it produced the
+        # "Could not summarize research" errors in the trial run.
+        # The only loss is a summary paragraph in the private note; the full
+        # reasoning for every prediction is still there.
+        enable_summarize_research=False,
         publish_reports_to_metaculus=publish_to_metaculus,
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
@@ -1418,15 +1509,40 @@ if __name__ == "__main__":
         "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
     }
 
-    template_bot.log_report_summary(forecast_reports)
+    # raise_errors=False, deliberately. The SDK's default is True and it raises
+    # RuntimeError if ANY question errored — which skipped everything below it,
+    # including the banner and the season-rollover message. Two independent
+    # auditors found this on 1 Sept 2026: the SEASON_STALE_MESSAGE written that
+    # morning was unreachable on any run with a single failed question, which
+    # on recent evidence is most runs. We decide the exit code ourselves below.
+    template_bot.log_report_summary(forecast_reports, raise_errors=False)
     print_run_summary_banner(
         forecast_reports,
         will_publish=publish_to_metaculus,
         tournament_url=TOURNAMENT_URLS.get(run_mode),
     )
 
-    # Last thing in the file, so the log and banner are complete first. A red
-    # workflow run every ten minutes is the point: silence is what costs a
-    # season, and nothing else in this repository would notice.
+    # Exit code, decided here rather than inherited from log_report_summary.
+    #
+    # The bar for red is deliberately NOT "any question failed". At a run every
+    # ten minutes, one flaky question turning the whole run red trains whoever
+    # is watching to ignore red — and red is exactly what the season-rollover
+    # guard depends on being noticed. So partial failure warns loudly, and only
+    # a run that achieved nothing, or a stale season, fails the workflow.
+    successes = [r for r in forecast_reports if not isinstance(r, BaseException)]
+    failures = [r for r in forecast_reports if isinstance(r, BaseException)]
+    if failures:
+        logger.warning(
+            "%d of %d questions failed; %d forecast successfully.",
+            len(failures),
+            len(forecast_reports),
+            len(successes),
+        )
+
     if stale_season:
         raise SystemExit(SEASON_STALE_MESSAGE)
+    if forecast_reports and not successes:
+        raise SystemExit(
+            f"REFUSING TO PASS: all {len(failures)} questions failed and nothing "
+            "was submitted. A green tick here would be a lie."
+        )
