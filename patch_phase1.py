@@ -28,6 +28,20 @@ def replace(old, new, label):
     print(f"  ok  {label}")
 
 
+def replace_all(old, new, expected, label):
+    """Same contract as replace(), but for an edit that must hit N sites.
+
+    The count is stated rather than inferred, so if upstream adds or removes a
+    call site the build fails instead of quietly gating three of four.
+    """
+    global text, edits
+    found = text.count(old)
+    assert found == expected, f"PATCH FAILED [{label}]: found {found} matches, expected exactly {expected}"
+    text = text.replace(old, new)
+    edits += 1
+    print(f"  ok  {label} ({expected} sites)")
+
+
 # ---------------------------------------------------------------------------
 # 1. PREDICTION CAPS  (Fall 2025 survey: strongest within-winners
 #    differentiator, r = +0.48, p = 0.005. Template ships 0.01/0.99; we tighten
@@ -357,7 +371,7 @@ RESEARCH_REPORTS_PER_QUESTION = 1
 # MODEL_TIER, and delete it to fall back to the default below. Note this does
 # NOT weaken assert_tier_matches_mode: a scored tournament still refuses to run
 # on anything but "season", wherever the value came from.
-VALID_MODEL_TIERS = ("free", "test", "season")
+VALID_MODEL_TIERS = ("free", "test", "trial", "season")
 MODEL_TIER = (os.environ.get("MODEL_TIER") or "test").strip().lower()
 if MODEL_TIER not in VALID_MODEL_TIERS:
     # Fail here rather than three steps later inside build_llm_config, so a
@@ -471,6 +485,54 @@ SEASON_MODELS = {
     "researcher": "openrouter/perplexity/sonar",
 }
 
+# TRIAL TIER. Strong-but-cheap, for scored runs we are paying for ourselves.
+#
+# Metaculus's own model leaderboard (read 31 Aug 2026) puts Gemini 3.6 Flash at
+# 12.70 against Claude Fable 5 High at 13.77 — around 8 percent off the pace.
+# OpenRouter prices them, verified live against /api/v1/models the same day, at
+# $0.75/$3.75 and $10/$50 per million tokens: Fable is 13.3x dearer for that 8
+# percent.
+#
+# Measured cost on the season tier was about $0.10 a prediction, so this tier
+# should land nearer $0.0075 — a 60-question MiniBench round for a few pounds
+# rather than about $30. Frontier models are the right call on Metaculus's
+# credits and the wrong one on ours.
+#
+# Research stays on Sonar. Cutting search is the one economy that reliably
+# loses more than it saves.
+TRIAL_MODELS = {
+    "default": "openrouter/google/gemini-3.6-flash",
+    "summarizer": "openrouter/google/gemini-3.6-flash",
+    "parser": "openrouter/google/gemini-3.6-flash",
+    "researcher": "openrouter/perplexity/sonar",
+}
+
+# PACING THE DEFAULT MODEL.
+#
+# Measured, not guessed. The first ever season-tier run, 31 Aug 2026, returned:
+#   "Rate limit exceeded: new-account-rpm/anthropic/claude-5-fable-20260609.
+#    Rate limit reached: new accounts are limited to 20 requests per minute"
+# with X-RateLimit-Limit: 20 and limit_source: openrouter_new_account. Out of
+# that run: 87 calls rejected, 18 of 45 predictions landed, and 13 questions
+# forfeited outright by the SDK's "at least half the samples must succeed"
+# rule. Nothing in the bot noticed anything was wrong with its own design.
+#
+# The cause is burstiness, not volume. _max_concurrent_questions bounds
+# run_research ONLY; once questions clear research their predictions all fire
+# together, so nine questions at five predictions each puts dozens of calls at
+# one model in the same second. Throttling questions would not have fixed it.
+#
+# 15 a minute against a limit of 20 leaves headroom for the retries GeneralLlm
+# makes underneath this gate — those do not re-acquire, so they are invisible
+# to the limiter and must simply be left room for. Capacity equals the
+# per-minute figure, which is the library's intended "requests per minute"
+# shape: a minute's worth may burst, then the bucket refills over the next
+# minute before more is allowed.
+#
+# Cost of the pacing: a five-question tournament pass is 25 default calls, so
+# under two minutes of the 90-minute window. Not the binding constraint.
+DEFAULT_MODEL_RPM = 15
+
 # Phase 2 ensemble members, kept here so the intent is recorded even though
 # nothing reads this yet. Chosen across four families deliberately: the
 # published research says decorrelation is what makes an ensemble worth having.
@@ -480,6 +542,13 @@ ENSEMBLE_MODELS = [
     "openrouter/google/gemini-3.1-pro-preview",
     "openrouter/x-ai/grok-4.6",
 ]
+
+
+# Tiers that constitute a real forecasting configuration: five predictions a
+# question and live research. "trial" qualifies on both counts — it is simply
+# cheaper, and it is what we can afford for scored MiniBench rounds until the
+# Metaculus credits arrive. "test" and "free" do not qualify, and never should.
+TOURNAMENT_READY_TIERS = ("season", "trial")
 
 
 def assert_tier_matches_mode(run_mode: str) -> None:
@@ -492,18 +561,26 @@ def assert_tier_matches_mode(run_mode: str) -> None:
     """
     if run_mode != "tournament":
         return
-    if MODEL_TIER != "season":
+    if MODEL_TIER not in TOURNAMENT_READY_TIERS:
         raise SystemExit(
             f"REFUSING TO RUN: mode=tournament but MODEL_TIER={MODEL_TIER!r}. "
-            "The tournament is scored. Set MODEL_TIER = 'season' in main.py, or "
-            "run --mode test_questions against the bot testing area instead."
+            f"The tournament is scored. Set MODEL_TIER to one of "
+            f"{TOURNAMENT_READY_TIERS}, or run --mode test_questions against "
+            "the bot testing area instead."
         )
-    if SEASON_MODELS.get("researcher") in (None, "", "no_research", "None"):
+    models = {"season": SEASON_MODELS, "trial": TRIAL_MODELS}[MODEL_TIER]
+    if models.get("researcher") in (None, "", "no_research", "None"):
         raise SystemExit(
-            "REFUSING TO RUN: the season configuration has no researcher. "
+            f"REFUSING TO RUN: the {MODEL_TIER} configuration has no researcher. "
             "Forecasting news questions with no search produced a negative "
             "expected score in Metaculus's own evidence. Set a researcher in "
-            "SEASON_MODELS."
+            f"{MODEL_TIER.upper()}_MODELS."
+        )
+    if MODEL_TIER == "trial":
+        logger.warning(
+            "Forecasting a SCORED tournament on the TRIAL tier: cheaper models, "
+            "about 8 percent off the frontier on Metaculus's own leaderboard. "
+            "Deliberate while we are paying for inference ourselves."
         )
 
 
@@ -563,7 +640,12 @@ def predictions_per_report():
 
 def build_llm_config():
     """Return the llms= mapping for the bot, per MODEL_TIER."""
-    tiers = {"free": FREE_MODELS, "test": TEST_MODELS, "season": SEASON_MODELS}
+    tiers = {
+        "free": FREE_MODELS,
+        "test": TEST_MODELS,
+        "trial": TRIAL_MODELS,
+        "season": SEASON_MODELS,
+    }
     if MODEL_TIER not in tiers:
         raise ValueError(
             f"MODEL_TIER must be one of {sorted(tiers)}, got {MODEL_TIER!r}"
@@ -820,8 +902,43 @@ replace(
     # worst precisely where we least want it — multiple choice, where the
     # parser is instructed to emit 0% options and two parses of a long option
     # list can differ by a digit.
-    _structure_output_validation_samples = 1""",
-    "parse validation samples: 1, never 2",
+    _structure_output_validation_samples = 1
+
+    # One bucket shared by every question in the run, because OpenRouter's
+    # limit is per model per account, not per question. See DEFAULT_MODEL_RPM.
+    _default_model_limiter = RefreshingBucketRateLimiter(
+        capacity=DEFAULT_MODEL_RPM, refresh_rate=DEFAULT_MODEL_RPM / 60
+    )
+
+    async def _invoke_default_llm(self, prompt: str) -> str:
+        \"\"\"The single door every default-model call goes through.
+
+        Centralised deliberately. The failure this fixes was four separate call
+        sites each firing as fast as asyncio would allow, with nothing in the
+        bot aware of the others. A rate limit is a property of the account, so
+        the gate has to be shared, not per-question.
+        \"\"\"
+        await self._default_model_limiter.wait_till_able_to_acquire_resources(1)
+        return await self.get_llm(\"default\", \"llm\").invoke(prompt)""",
+    "parse validation samples: 1, never 2; plus the shared rate limiter",
+)
+
+# ---------------------------------------------------------------------------
+# 13. RATE LIMITING  (observed live on 31 Aug 2026 — see the DEFAULT_MODEL_RPM
+#     note in the config block. Four call sites fired independently and blew
+#     through OpenRouter's 20/min new-account limit on the default model.)
+# ---------------------------------------------------------------------------
+replace(
+    "    ReasonedPrediction,\n    SmartSearcher,",
+    "    ReasonedPrediction,\n    RefreshingBucketRateLimiter,\n    SmartSearcher,",
+    "import the rate limiter",
+)
+
+replace_all(
+    '        reasoning = await self.get_llm("default", "llm").invoke(prompt)',
+    "        reasoning = await self._invoke_default_llm(prompt)",
+    4,
+    "route every default-model call through the rate limiter",
 )
 
 # ===========================================================================

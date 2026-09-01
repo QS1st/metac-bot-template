@@ -12,6 +12,91 @@ different bot.
 
 ---
 
+## 2026-08-31 (night, last) — a trial tier, because frontier models are ours to pay for
+
+The measured cost above makes the seasonal configuration unaffordable for any
+run Metaculus is not funding: about $30 a MiniBench round, $135–$275 a season,
+against a $8.05 balance. Skipping scored rounds entirely until the credits
+arrive would mean entering Fall with no scored run behind us, which is the
+worse risk. So there is now a fourth tier.
+
+- **`trial`: Gemini 3.6 Flash as default, summariser and parser; Sonar still
+  doing the research.** Metaculus's own model leaderboard puts Gemini 3.6 Flash
+  at 12.70 against Claude Fable 5 High at 13.77 — about 8 percent off the pace.
+  OpenRouter prices them at $0.75/$3.75 and $10/$50 per million tokens, so
+  Fable is **13.3x dearer for that 8 percent**. Both figures verified live, the
+  pricing against `/api/v1/models` rather than from memory, which is the
+  standing rule since the stock template's default researcher 404'd on day one.
+- **Research stays on Sonar at every paid tier.** Cutting search is the one
+  economy that reliably costs more than it saves — Metaculus's own evidence
+  puts it at 3.6x Brier — and a negative total pays nothing under `max(total,0)²`.
+- **`trial` counts as tournament-ready; `test` and `free` still do not.**
+  `assert_tier_matches_mode` now admits a tier only if it is a genuine
+  forecasting configuration: five predictions a question and a live researcher.
+  `trial` qualifies on both. A scored run on `trial` logs a warning saying so,
+  because it is a deliberate compromise rather than the intended setup.
+- **Nine unit tests** cover the tier, including the two that matter most —
+  that `test` and `free` remain barred from a scored tournament — plus a guard
+  that every tournament-ready tier is actually a valid tier, so the two lists
+  cannot drift apart. Verified by running the guard at all five tier values.
+
+Expected effect: a 60-question MiniBench round for a few dollars rather than
+about thirty, which brings 7 September within reach of the balance we have.
+
+## 2026-08-31 (night, after the first season-tier run) — rate limiting
+
+The season configuration ran for the first time, against the bot-testing-area.
+It had never been exercised before — only reasoned about — and it failed in a
+way no amount of reading would have found.
+
+**What happened.** Nine questions retrieved, nine research calls fine (the
+`no_research` → `perplexity/sonar` swap works). Then OpenRouter:
+
+    Rate limit exceeded: new-account-rpm/anthropic/claude-5-fable-20260609.
+    Rate limit reached: new accounts are limited to 20 requests per minute
+    X-RateLimit-Limit: 20   limit_source: openrouter_new_account
+
+87 calls rejected. 18 of 45 predictions landed. 13 questions forfeited by the
+SDK's "at least half the samples must succeed" rule — the exact mechanism
+documented two entries above, now observed rather than inferred.
+
+**Why, and why the obvious fix would have missed.** The cause is burstiness,
+not volume. `_max_concurrent_questions` bounds `run_research` only — noted
+earlier today as "fine on paid models with many endpoints", which was true
+about endpoints and wrong about rate limits. Once questions clear research
+their predictions all fire together, so nine questions at five predictions each
+put dozens of calls at one model in the same second. Lowering the question
+concurrency would have reduced the burst without bounding it.
+
+- **A shared token bucket now paces every default-model call.** One
+  `RefreshingBucketRateLimiter` — the mechanism the upstream template's own
+  docstring recommends for this — at `DEFAULT_MODEL_RPM = 15`, capacity 15,
+  refresh 0.25/second. Shared across the whole run, because the limit is a
+  property of the account, not of a question.
+- **All four prompt paths now go through one method**, `_invoke_default_llm`.
+  The failure was four call sites each firing as fast as asyncio allowed with
+  nothing aware of the others; a gate only works if there is one door.
+- **15 a minute against a limit of 20** leaves room for the retries
+  `GeneralLlm` makes underneath the gate. Those do not re-acquire, so they are
+  invisible to the limiter and can only be left space for.
+- **The patch gained `replace_all`**, which states the expected number of call
+  sites. If upstream adds a fifth, the build fails rather than quietly pacing
+  four of five.
+- **Four structural unit tests** assert the invariant directly: no un-gated
+  call sites, four gated ones, the acquire happens before the invoke, and the
+  pace stays under the observed limit. Behavioural tests would not have caught
+  the original bug; this is a property of the file, so the file is what is
+  checked. 47 tests now.
+
+**The cost figure, which is the more important result.** $9.93 → $8.05, so
+$1.88 for 18 landed predictions and 9 research calls — roughly $0.10 a
+prediction, near enough $0.50 a question at five predictions. Rejected calls
+are free, so this is a clean unit cost. That extrapolates to about $30 for a
+60-question MiniBench round and $135–$275 for a 300–500 question season. The
+Metaculus LLM credits are therefore load-bearing, not a convenience, and
+Claude Fable 5 as the default is a decision that needs revisiting for any
+self-funded run.
+
 ## 2026-08-31 (night, last) — the repository variables actually reach the bot
 
 Writing the cost-probe instructions exposed a hole in the rollover fix made

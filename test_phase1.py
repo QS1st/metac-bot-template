@@ -164,6 +164,64 @@ def run():
 
     check("empty list survives", floor_mc([]), [])
 
+    print("\n  -- the trial tier --")
+    mods = load(consts=("TRIAL_MODELS", "SEASON_MODELS", "TOURNAMENT_READY_TIERS",
+                        "VALID_MODEL_TIERS"))[-1]
+    check("trial is a valid tier", "trial" in mods.VALID_MODEL_TIERS, True)
+    check("trial may forecast a scored tournament", "trial" in mods.TOURNAMENT_READY_TIERS, True)
+    # The whole point of the guard: cheap tiers must never reach a scored run.
+    check("test may NOT", "test" in mods.TOURNAMENT_READY_TIERS, False)
+    check("free may NOT", "free" in mods.TOURNAMENT_READY_TIERS, False)
+    check("every tournament-ready tier is a real tier",
+          all(t in mods.VALID_MODEL_TIERS for t in mods.TOURNAMENT_READY_TIERS), True)
+    check("trial keeps live research", mods.TRIAL_MODELS.get("researcher"),
+          mods.SEASON_MODELS.get("researcher"))
+    check("trial defines every role",
+          sorted(mods.TRIAL_MODELS) == sorted(mods.SEASON_MODELS), True)
+    check("trial is genuinely cheaper, not a copy of season",
+          mods.TRIAL_MODELS["default"] != mods.SEASON_MODELS["default"], True)
+    check("trial routes through OpenRouter like the rest",
+          all(m.startswith("openrouter/") for m in mods.TRIAL_MODELS.values()), True)
+
+    print("\n  -- default-model rate limiting --")
+    # Structural checks, not behavioural ones. The thing that cost us a run was
+    # a call site nobody was pacing, so what needs guarding is the invariant
+    # "every default-model call goes through the gate" — which is a property of
+    # the file, and stays true only if something keeps checking it.
+    src = pathlib.Path(__file__).with_name("main.py").read_text()
+    ungated = _re.findall(
+        r"\n {8}\w[\w.]* = await self\.get_llm\(\"default\", \"llm\"\)\.invoke", src
+    )
+    check("no un-gated default-model call sites remain", ungated, [])
+    check(
+        "all four prompt paths go through the gate",
+        len(_re.findall(r"await self\._invoke_default_llm\(prompt\)", src)),
+        4,
+    )
+    check(
+        "the gate acquires BEFORE it invokes",
+        bool(
+            _re.search(
+                r"wait_till_able_to_acquire_resources\(1\)\s*\n\s*return await self\.get_llm",
+                src,
+            )
+        ),
+        True,
+    )
+    check(
+        "the limiter is built from DEFAULT_MODEL_RPM, not a loose number",
+        bool(
+            _re.search(
+                r"capacity=DEFAULT_MODEL_RPM,\s*refresh_rate=DEFAULT_MODEL_RPM / 60", src
+            )
+        ),
+        True,
+    )
+    rpm = load(consts=("DEFAULT_MODEL_RPM",))[-1].DEFAULT_MODEL_RPM
+    # OpenRouter's observed new-account limit on the default model is 20/min.
+    # Retries happen below the gate and do not re-acquire, so we need slack.
+    check("the pace leaves headroom under the observed 20/min limit", rpm <= 18, True)
+
     print("\n  -- season rollover guard --")
     # The values come out of main.py rather than being restated here, so this
     # block cannot pass while disagreeing with the code it is testing.
