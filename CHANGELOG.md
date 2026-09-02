@@ -12,6 +12,39 @@ different bot.
 
 ---
 
+## 2026-09-02 (settled) — group questions are back on, because it was tested
+
+`check_group_questions.py`, run against the bot-testing-area as a manual
+workflow, answered the one question that was holding group questions out:
+
+    9 open question(s): 4 in groups, 5 standalone.
+    43329  in group  already forecast: True   (post 43325)
+    43330  in group  already forecast: True   (post 43325)
+    43323  in group  already forecast: True   (post 43322)
+    43324  in group  already forecast: True   (post 43322)
+
+Four for four. Metaculus does populate `my_forecasts` per subquestion, so
+`skip_previously_forecasted_questions` holds for unpacked group subquestions and
+there is no risk of breaching the one-forecast-per-question rule.
+`SKIP_GROUP_QUESTIONS` is now `False` — the switch stays so the decision is
+reversible, and the unit tests exercise it in both positions rather than only
+the default.
+
+Two things worth recording about how this was settled.
+
+The evidence already existed: earlier Test Bot runs had forecast those group
+questions before skipping was introduced, so the check needed no new forecast
+and cost nothing. Worth remembering — a question about past behaviour is often
+answerable from what already happened.
+
+And the check was delivered as a **workflow, not a command line**. The first
+version told Iain to run `poetry run python …`, which assumed a local
+development environment he has never had; everything on this project runs
+through the Actions tab. Instructions written for the wrong machine are the
+documentation equivalent of a test that agrees with itself.
+
+118 unit tests.
+
 ## 2026-09-02 (fifth audit round) — the deferred list, and one thing above it
 
 An audit of the items previously noted-but-not-fixed. Its first finding was not

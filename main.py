@@ -657,32 +657,33 @@ def tournament_slug_problem(tournament_id, questions, label: str) -> str | None:
     )
 
 
-# GROUP QUESTIONS ARE SKIPPED UNTIL SKIPPING IS PROVEN TO WORK ON THEM.
+# GROUP QUESTIONS: ON. Skipping was PROVEN to work on them, 2 Sept 2026.
 #
-# skip_previously_forecasted_questions is the ONLY thing stopping a 10-minute
-# cron re-forecasting the same question all season, and it reads
+# The worry was that skip_previously_forecasted_questions — the only thing
+# stopping a 10-minute cron re-forecasting the same question all season — reads
 # question.already_forecasted, which the SDK fills from
 # question_json["my_forecasts"]["history"]. For an unpacked GROUP subquestion
-# that json is deep-copied straight from the group payload, so the field is
-# present only if Metaculus puts my_forecasts on each subquestion. Nobody
-# knows whether it does: the SDK explicitly patches this for CONDITIONAL
-# questions and does nothing equivalent for groups, which reads like the case
-# was never considered.
+# that json is deep-copied from the group payload, so the field is only there
+# if Metaculus puts my_forecasts on each subquestion. The SDK explicitly
+# patches this for CONDITIONAL questions and does nothing for groups, which
+# read like the case had never been considered. If it failed open we would
+# re-forecast group subquestions 144 times a day — wasted spend, and a breach
+# of the one-forecast-per-question rule for bot-only tournaments.
 #
-# If it fails open we would re-forecast group subquestions 144 times a day —
-# wasted spend, and a breach of Metaculus's "only one forecast per question"
-# rule for bot-only tournaments. A rule breach is not a risk worth carrying for
-# a few extra questions, so groups are excluded until the check below says
-# otherwise. Flip this to False once verified.
+# Settled by running check_group_questions.py against the bot-testing-area,
+# where earlier Test Bot runs had already forecast the group questions:
 #
-# To verify (needs the Metaculus token, after a forecast has landed):
-#   qs = MetaculusClient().get_all_open_questions_from_tournament("minibench")
-#   for q in qs:
-#       print(q.id_of_question, q.question_ids_of_group is not None,
-#             q.already_forecasted)
-# Any row that is part of a group, that you have already forecast, and that
-# still reports already_forecasted == False, means skipping fails open.
-SKIP_GROUP_QUESTIONS = True
+#     9 open question(s): 4 in groups, 5 standalone.
+#     43329  in group  already forecast: True   (post 43325)
+#     43330  in group  already forecast: True   (post 43325)
+#     43323  in group  already forecast: True   (post 43322)
+#     43324  in group  already forecast: True   (post 43322)
+#
+# Four for four. Metaculus does populate my_forecasts per subquestion, so
+# skipping holds and group questions are back in play. The switch stays so the
+# decision is reversible if that ever stops being true — re-run the check
+# rather than assuming.
+SKIP_GROUP_QUESTIONS = False
 
 
 def drop_group_questions(questions, label: str):

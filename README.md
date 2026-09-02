@@ -21,11 +21,12 @@
 > - `run_bot_on_metaculus_cup.yaml` has been **deleted**. The tier guard does not
 >   cover that mode, so enabling it would have run cheap models on a scored
 >   public board. Do not restore it without extending the guard.
-> - Group questions are currently **skipped** (`SKIP_GROUP_QUESTIONS` in
->   `main.py`) until we can show the SDK reports them as already forecast —
->   re-forecasting one would breach the one-forecast-per-question rule. Run
->   the **Check group questions** workflow (Actions tab) to settle it — it is
->   read-only, makes no LLM calls, and prints its verdict on the run summary.
+> - Group questions ARE forecast. That was verified rather than assumed: the
+>   **Check group questions** workflow (Actions tab) confirmed the SDK reports
+>   group subquestions as already forecast, so the one-forecast-per-question
+>   rule is safe. `SKIP_GROUP_QUESTIONS` in `main.py` flips it back if that ever
+>   changes; re-run the workflow rather than guessing. It is read-only and makes
+>   no LLM calls.
 > - `main.py` is generated: `patch_phase1.py` applies every change to the
 >   upstream template, and CI fails if the committed `main.py` does not match
 >   what the patch produces.

@@ -502,21 +502,29 @@ def run():
     check("bulleted options then a real answer takes the answer",
           caps("Options:\n- AMBIGUITY: LOW\n- AMBIGUITY: HIGH\nReasoning.\nAMBIGUITY: LOW"), NORMAL)
 
-    print("\n  -- group questions are skipped until skipping is proven --")
-    # A rule breach is not worth a few extra questions. Metaculus requires one
-    # forecast per question in bot-only tournaments, and we cannot yet show the
-    # SDK reports group subquestions as already forecast.
+    print("\n  -- group questions are ON, because skipping was proven --")
+    # Settled 2 Sept 2026 by check_group_questions.py against the
+    # bot-testing-area: all four group subquestions reported
+    # already_forecasted=True, so skip_previously_forecasted_questions holds for
+    # them and we are not at risk of breaching the one-forecast-per-question
+    # rule. The switch stays, so the decision is reversible on new evidence.
     drop, mods5 = load("drop_group_questions", consts=("SKIP_GROUP_QUESTIONS",))
 
     class GQ:
         def __init__(self, gid): self.question_ids_of_group = gid
 
-    check("group questions are excluded by default", mods5.SKIP_GROUP_QUESTIONS, True)
-    kept = drop([GQ(None), GQ([1, 2]), GQ(None)], "Seasonal")
-    check("only non-group questions survive", len(kept), 2)
+    check("group questions are forecast by default now", mods5.SKIP_GROUP_QUESTIONS, False)
+    check("so nothing is dropped", len(drop([GQ(None), GQ([1, 2]), GQ(None)], "Seasonal")), 3)
+    check("the evidence is recorded next to the switch",
+          "Four for four" in src and "43329" in src, True)
+
+    # The switch must still WORK if we ever have to flip it back.
+    mods5.SKIP_GROUP_QUESTIONS = True
+    check("flipped back, group questions are excluded",
+          len(drop([GQ(None), GQ([1, 2]), GQ(None)], "Seasonal")), 2)
     check("a list with no groups is untouched", len(drop([GQ(None)], "Seasonal")), 1)
     check("an empty list survives", drop([], "Seasonal"), [])
-    check("the switch is documented as reversible", "Flip this to False once verified" in src, True)
+    mods5.SKIP_GROUP_QUESTIONS = False
 
     print("\n  -- the tournament must actually BE a bot tournament --")
     # The count check alone cannot tell a typo from a correct ID: Metaculus
