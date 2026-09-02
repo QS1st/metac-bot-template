@@ -1219,5 +1219,15 @@ replace(
     "multiple-choice parsing: never emit a literal zero",
 )
 
+# ---------------------------------------------------------------------------
+# 17. DATE PATH CDF  (same reasoning as edit 3, applied to the date path,
+#     which the numeric anchor does not reach.)
+# ---------------------------------------------------------------------------
+replace(
+    '        prediction = NumericDistribution.from_question(percentile_list, question)\n        logger.info(\n            f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."\n        )\n        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)\n\n    def _create_upper_and_lower_bound_messages(',
+    '        prediction = NumericDistribution.from_question(percentile_list, question)\n        # Same reasoning as the numeric path: fail a bad sample as a sample.\n        prediction.get_cdf()\n        logger.info(\n            f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."\n        )\n        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)\n\n    def _create_upper_and_lower_bound_messages(',
+    "force CDF expansion per sample on the date path",
+)
+
 DST.write_text(text)
 print(f"\n{edits} edits applied cleanly -> {DST}")

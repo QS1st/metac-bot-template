@@ -12,6 +12,29 @@ different bot.
 
 ---
 
+## 2026-09-02 (third attempt) — stop guessing at the build, actually run it
+
+The second commit failed the same step for the same reason: the date path's
+`get_cdf()` was in `main.py` with no patch entry. The heuristic added an hour
+earlier did not catch it, because it is a hand-maintained list of markers and
+neither orphaned block happened to contain one. Two of Iain's commits went on
+discovering what a real diff shows in a second.
+
+- **The date path now has its own patch edit.** The numeric anchor does not
+  reach it; they are separate call sites and need separate entries. 18 edits.
+- **The local check now runs the real build.** A copy of upstream `main.py` is
+  cached outside the repository, and when `UPSTREAM_MAIN` points at it the test
+  suite runs `patch_phase1.py` against it and asserts the output is
+  byte-identical to the committed `main.py` — the same thing CI does, minus the
+  clone. It reports 18 edits applied and an empty diff.
+- The marker heuristic stays as a fallback for CI, where no cached upstream
+  exists and the workflow does its own authoritative rebuild a step later.
+
+The lesson is the one this project keeps relearning in different costumes: a
+check that approximates the real thing will eventually approximate it wrongly.
+Reading the SDK rather than guessing at it found the researcher bug; running
+the patch rather than pattern-matching it finds this class. 82 unit tests.
+
 ## 2026-09-02 (later) — the build check caught an edit with no patch entry
 
 The commit went red on "The committed main.py must match what the patch

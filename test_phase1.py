@@ -364,6 +364,33 @@ def run():
                 continue
             residue = residue.replace(new_text, old_text)
 
+    # If a cached copy of upstream main.py is available, do the REAL thing
+    # instead: run the patch and diff, exactly as CI does. Set UPSTREAM_MAIN to
+    # its path. The heuristic below is only a stand-in for when it is absent —
+    # which is the case in CI itself, where the workflow clones upstream and
+    # runs its own authoritative rebuild-and-diff a step later.
+    #
+    # This exists because the heuristic was not enough. It is a hand-maintained
+    # list of markers, and on 2 Sept 2026 it missed two orphaned edits in a row
+    # (the multiple-choice parsing instruction, then the date path's get_cdf)
+    # simply because neither happened to contain a listed marker. Two commits
+    # of Iain's time went on discovering what a real diff would have shown in
+    # one second.
+    upstream_path = _os.environ.get("UPSTREAM_MAIN")
+    if upstream_path and pathlib.Path(upstream_path).exists():
+        import subprocess, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            built = pathlib.Path(td) / "rebuilt.py"
+            proc = subprocess.run(
+                [sys.executable, str(pathlib.Path(__file__).with_name("patch_phase1.py")),
+                 upstream_path, str(built)],
+                capture_output=True, text=True,
+            )
+            check("the patch applies cleanly to upstream", proc.returncode, 0)
+            if proc.returncode == 0:
+                check("main.py is byte-identical to the patch output",
+                      built.read_text() == src, True)
+
     OURS = ("Audit, 1 Sept", "audit on 1 Sept", "audit 2 Sept", "REFUSING TO",
             "PER_MODEL_RPM", "EMPTY_RESEARCH_COUNT", "AMBIGUITY: LOW",
             "NEVER emit exactly 0", "seasonal_missing", "_invoke_default_llm",
