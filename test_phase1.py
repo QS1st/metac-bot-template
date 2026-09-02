@@ -41,6 +41,10 @@ def load(*names, consts=()):
     )
     module.BINARY_FLOOR, module.BINARY_CEILING = 0.02, 0.98
     module.AMBIGUOUS_FLOOR, module.AMBIGUOUS_CEILING = 0.10, 0.90
+    # Some constants are tier-dependent (LLM_ALLOWED_TRIES, MAX_CONCURRENT_QUESTIONS).
+    # Mirror main.py's own resolution so lifting them works without importing.
+    module.MODEL_TIER = (_os.environ.get("MODEL_TIER") or "test").strip().lower()
+    module.USE_FREE_MODELS = module.MODEL_TIER in ("free", "test")
 
     wanted = set(names)
     wanted_consts = set(consts)
@@ -79,10 +83,17 @@ class P:
 
 
 def raises(fn, *args):
+    """True if fn(*args) raises.
+
+    Catches SystemExit explicitly as well as Exception: SystemExit inherits
+    from BaseException, so a bare `except Exception` lets it through and kills
+    the whole test run instead of recording a pass. The guards in main.py use
+    SystemExit deliberately, so this helper has to see them.
+    """
     try:
         fn(*args)
         return False
-    except Exception:
+    except (Exception, SystemExit):
         return True
 
 
@@ -129,7 +140,16 @@ def run():
     check("empty list survives", vals(sorted_percentiles([])), [])
 
     print("\n  -- ambiguity-bounded caps --")
-    NORMAL, TIGHT = (0.02, 0.98), (0.10, 0.90)
+    # Lifted from main.py, not restated. Hard-coding these meant all 15 caps
+    # assertions would still pass if BINARY_FLOOR were changed to 0.30.
+    _capmod = load(consts=("BINARY_FLOOR", "BINARY_CEILING",
+                           "AMBIGUOUS_FLOOR", "AMBIGUOUS_CEILING"))[-1]
+    NORMAL = (_capmod.BINARY_FLOOR, _capmod.BINARY_CEILING)
+    TIGHT = (_capmod.AMBIGUOUS_FLOOR, _capmod.AMBIGUOUS_CEILING)
+    check("the caps really are tighter than the template's 0.01/0.99",
+          NORMAL[0] > 0.01 and NORMAL[1] < 0.99, True)
+    check("and the ambiguous caps are tighter still",
+          TIGHT[0] > NORMAL[0] and TIGHT[1] < NORMAL[1], True)
     check("no flag falls back to normal caps", caps("some reasoning"), NORMAL)
     check("empty reasoning is safe", caps(""), NORMAL)
     check("None reasoning is safe", caps(None), NORMAL)
@@ -194,7 +214,7 @@ def run():
     # the file, and stays true only if something keeps checking it.
     src = pathlib.Path(__file__).with_name("main.py").read_text()
     mods2 = load(consts=("PER_MODEL_RPM", "PER_MODEL_BURST", "PARSER_ALLOWED_TRIES",
-                         "STRUCTURE_OUTPUT_ALLOWED_TRIES"))[-1]
+                         "STRUCTURE_OUTPUT_ALLOWED_TRIES", "LLM_ALLOWED_TRIES"))[-1]
     ungated = _re.findall(
         r"\n {8}\w[\w.]* = await self\.get_llm\(\"default\", \"llm\"\)\.invoke", src
     )
@@ -256,9 +276,16 @@ def run():
           bool(_re.search(r'kwargs\.setdefault\("allowed_tries", STRUCTURE_OUTPUT_ALLOWED_TRIES\)', src)), True)
     check("the parser is a GeneralLlm so allowed_tries can be set",
           bool(_re.search(r"allowed_tries=PARSER_ALLOWED_TRIES", src)), True)
-    worst_case = mods2.PARSER_ALLOWED_TRIES * mods2.STRUCTURE_OUTPUT_ALLOWED_TRIES
-    check("worst-case wire requests per acquisition stay within the limit",
-          mods2.PER_MODEL_RPM * worst_case <= 20, True)
+    # BOTH buckets, not just the parser. The first version of this test computed
+    # only the parser arithmetic — which passed — and stayed silent about the
+    # default model, where LLM_ALLOWED_TRIES=3 gave 30/min against a limit of 20.
+    # A test that checks the half that works is worse than no test.
+    parser_worst = mods2.PARSER_ALLOWED_TRIES * mods2.STRUCTURE_OUTPUT_ALLOWED_TRIES
+    default_worst = mods2.LLM_ALLOWED_TRIES
+    check("parser bucket worst case stays within the observed limit",
+          mods2.PER_MODEL_RPM * parser_worst <= 20, True)
+    check("DEFAULT bucket worst case stays within the observed limit",
+          mods2.PER_MODEL_RPM * default_worst <= 20, True)
     # The gate is worthless if both roles land on one model: OpenRouter's
     # throttle is per model, so they would share one real budget.
     check(
@@ -325,55 +352,75 @@ def run():
     check("we still fail the run when nothing was submitted",
           bool(_re.search(r"REFUSING TO PASS", src)), True)
     check("the season message is still raised",
-          bool(_re.search(r"raise SystemExit\(SEASON_STALE_MESSAGE\)", src)), True)
+          bool(_re.search(r"raise SystemExit\(SEASON_MISSING_MESSAGE\.format", src)), True)
 
-    print("\n  -- season rollover guard --")
-    # The values come out of main.py rather than being restated here, so this
-    # block cannot pass while disagreeing with the code it is testing.
-    is_stale, resolve, mod = load(
-        "season_is_stale",
-        "resolve_seasonal_tournament",
-        consts=("SEASON_GUARD_DATE", "STALE_SEASON_IDS"),
-    )
-    guard = mod.SEASON_GUARD_DATE
-    before = guard - timedelta(seconds=1)
-    after = guard + timedelta(days=30)
+    print("\n  -- season guard: a COUNT check, not a date and a denylist --")
+    # The old guard (SEASON_GUARD_DATE + STALE_SEASON_IDS + season_is_stale) was
+    # retired on 1 Sept 2026. It tested what the tournament ID *is*, so a typo in
+    # AIB_TOURNAMENT_ID walked straight past it: zero questions, green tick, every
+    # ten minutes for four months. It also expired — the Winter 2027 rollover had
+    # no alarm at all. Assert the removal so it cannot creep back.
+    for gone in ("season_is_stale", "SEASON_GUARD_DATE", "STALE_SEASON_IDS",
+                 "SEASON_STALE_MESSAGE"):
+        check(f"{gone} is gone", gone in src, False)
 
-    check("the pinned SDK's Summer ID is on the stale list", 33022 in mod.STALE_SEASON_IDS, True)
-    check("during the Summer season the guard stays quiet", is_stale(33022, before), False)
-    check("after the rollover date the Summer ID is stale", is_stale(33022, after), True)
-    check("the guard date itself counts as after", is_stale(33022, guard), True)
-    check("the ID as a string is caught too", is_stale("33022", after), True)
-    check("the Summer slug is caught too", is_stale("summer-futureeval-2026", after), True)
-    check("a genuine Fall ID is not stale", is_stale(33099, after), False)
-    check("MiniBench's slug is never stale", is_stale("minibench", after), False)
+    check("the seasonal question count is logged every run",
+          bool(_re.search(r'"Seasonal tournament %r: %d open questions"', src)), True)
+    # Zero OPEN questions is normal between windows; zero questions AT ALL is a
+    # dead ID. The probe distinguishes them and only runs when we would
+    # otherwise have exited silently.
+    check("an existence probe runs when nothing is open",
+          bool(_re.search(r"ApiFilter\(allowed_tournaments=\[seasonal_id\]\)", src)), True)
+    check("ApiFilter is imported", bool(_re.search(r"^    ApiFilter,$", src, _re.M)), True)
+    check("a missing tournament fails the run",
+          bool(_re.search(r"raise SystemExit\(SEASON_MISSING_MESSAGE\.format", src)), True)
+    check("a quiet window does NOT fail the run",
+          bool(_re.search(r"Normal between", src)), True)
 
-    class FakeClient:
-        CURRENT_AI_COMPETITION_ID = 33022
+    seasonal, mods3 = load("resolve_seasonal_tournament", consts=("SEASON_MISSING_MESSAGE",))
 
     saved = _os.environ.pop("AIB_TOURNAMENT_ID", None)
     try:
-        check("with no override we fall back to the SDK", resolve(FakeClient()), 33022)
+        # The SDK fallback is GONE. It used to return CURRENT_AI_COMPETITION_ID,
+        # which poetry.lock pins to Summer 2026 — so an unset variable quietly
+        # aimed a whole Fall season at a finished tournament. The count check
+        # downstream cannot catch that: a retired tournament still HAS
+        # questions, they are just all closed. Requiring the variable is the
+        # only thing that closes both failures without dates or ID lists.
+        check("an unset AIB_TOURNAMENT_ID refuses to run", raises(seasonal), True)
+        check("the old SDK fallback is gone from main.py",
+              "client.CURRENT_AI_COMPETITION_ID" in src, False)
 
         _os.environ["AIB_TOURNAMENT_ID"] = "33099"
-        check("a numeric override is used, as an int", resolve(FakeClient()), 33099)
-
+        check("a numeric override is used, as an int", seasonal(), 33099)
         _os.environ["AIB_TOURNAMENT_ID"] = "  33099  "
-        check("whitespace around the override is stripped", resolve(FakeClient()), 33099)
-
+        check("whitespace around the override is stripped", seasonal(), 33099)
         _os.environ["AIB_TOURNAMENT_ID"] = "fall-futureeval-2026"
-        check("a slug override is used verbatim", resolve(FakeClient()), "fall-futureeval-2026")
-
+        check("a slug override is used verbatim", seasonal(), "fall-futureeval-2026")
         _os.environ["AIB_TOURNAMENT_ID"] = "   "
-        check("a blank override falls back rather than breaking", resolve(FakeClient()), 33022)
-
-        # The whole point: an override the guard does not recognise must clear it.
-        _os.environ["AIB_TOURNAMENT_ID"] = "33099"
-        check("setting the override clears the guard", is_stale(resolve(FakeClient()), after), False)
+        check("a blank override refuses, it does not fall back", raises(seasonal), True)
     finally:
         _os.environ.pop("AIB_TOURNAMENT_ID", None)
         if saved is not None:
             _os.environ["AIB_TOURNAMENT_ID"] = saved
+
+    print("\n  -- research and forfeit guards --")
+    check("empty research is counted, not just logged",
+          bool(_re.search(r"EMPTY_RESEARCH_COUNT \+= 1", src)), True)
+    check("and the count can turn the run red",
+          bool(_re.search(r"if EMPTY_RESEARCH_COUNT:", src)), True)
+    # NumericReport.aggregate_predictions expands every sample's CDF in a list
+    # comprehension, so a raise there kills the QUESTION, not the sample. Forcing
+    # expansion inside the per-sample coroutine restores the 3-of-5 tolerance.
+    check("numeric and date samples force CDF expansion per sample",
+          len(_re.findall(r"prediction\.get_cdf\(\)", src)), 2)
+    # Our own parsing instruction used to manufacture the validator's rejection.
+    check("the parser is told never to emit a literal zero",
+          bool(_re.search(r"NEVER emit exactly 0", src)), True)
+    check("and to make the probabilities sum to 1",
+          bool(_re.search(r"sum to\s+exactly 1\.00", src)), True)
+    check("the old 0%-option instruction is gone",
+          "make it an entry in your final list with 0% probability" in src, False)
 
     print()
     if failures:

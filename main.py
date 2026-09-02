@@ -17,6 +17,7 @@ from bot_helpers import (
 silence_noisy_dependencies()
 
 from forecasting_tools import (
+    ApiFilter,
     AskNewsSearcher,
     BinaryQuestion,
     ForecastBot,
@@ -53,6 +54,12 @@ import re  # noqa: E402
 # Used by resolve_seasonal_tournament() to read the AIB_TOURNAMENT_ID
 # repository variable. Not imported upstream either; same failure mode.
 import os  # noqa: E402
+
+# Counts questions forecast with little or no research, so the run can be
+# failed at the end rather than only logged. See the check near the bottom of
+# the file. Module-level because run_research is a method on the bot and the
+# exit decision is made in __main__.
+EMPTY_RESEARCH_COUNT = 0
 
 # =============================================================================
 # PHASE 1 CONFIGURATION  —  all tunables live here, nowhere else.
@@ -251,7 +258,7 @@ MAX_CONCURRENT_QUESTIONS = 1 if MODEL_TIER == "free" else 3
 # MINUTES on its own — retrying a timeout multiplies the wait rather than
 # fixing anything. Free-tier 429s are transient and worth retrying; paid
 # failures usually are not, and OpenRouter already fails over between endpoints.
-LLM_ALLOWED_TRIES = 6 if MODEL_TIER == "free" else 3
+LLM_ALLOWED_TRIES = 6 if MODEL_TIER == "free" else 2
 LLM_TIMEOUT_SECONDS = 120 if MODEL_TIER == "free" else 90
 
 # Season tier. claude-fable-5 is the default because it currently sits top of
@@ -555,57 +562,58 @@ def build_llm_config():
 # MiniBench, and then fails the run so the workflow turns red.
 # =============================================================================
 
-# When the alarm starts sounding. Deliberately NOT the day Summer stops posting
-# questions (early September): between then and the Fall launch there is nothing
-# anyone could do about it, since Metaculus has not published a Fall ID, and an
-# alarm nobody can act on is one people learn to ignore. Aiming at a finished
-# tournament in that gap is free — zero questions means zero model calls — so
-# the guard waits until a week before Fall opens on 28 September. That is one
-# week of red runs to find and set the ID, and no false alarms before it.
-SEASON_GUARD_DATE = datetime(2026, 9, 21, tzinfo=timezone.utc)
-
-# What the pinned SDK still points at. Both the numeric and slug forms are
-# listed because either can arrive depending on where the value came from.
-STALE_SEASON_IDS = frozenset({33022, "33022", "summer-futureeval-2026"})
-
-SEASON_STALE_MESSAGE = (
-    "SEASON ROLLOVER NOT DONE. The seasonal target is still Summer 2026, which "
-    "has stopped posting questions: forecasting it would return zero questions "
-    "and exit green. The seasonal half of this run was SKIPPED; MiniBench was "
-    "forecast as normal. Fix: set the repository variable AIB_TOURNAMENT_ID "
-    "(Settings > Secrets and variables > Actions > Variables) to the Fall 2026 "
+# The old guard was a fixed date plus a three-item denylist of known-stale IDs.
+# An audit on 1 Sept 2026 showed it tested the wrong thing: it asked what the
+# tournament ID *is*, not what it *does*. A typo in AIB_TOURNAMENT_ID sailed
+# straight past it — zero questions, green tick, every ten minutes for four
+# months. It also expired: once the Fall ID was set the guard was spent, and
+# the Winter 2027 rollover would have repeated the original failure with no
+# alarm at all.
+#
+# Replaced by a question COUNT check at the point of use. It needs no dates, no
+# ID list and no maintenance, and it is correct at every future rollover.
+SEASON_MISSING_MESSAGE = (
+    "SEASONAL TOURNAMENT NOT FOUND: {tournament!r} contains no questions at "
+    "all. That is a wrong or retired tournament ID, not a quiet hour — a live "
+    "tournament always has questions even when none are currently open. The "
+    "seasonal half of this run forecast NOTHING. MiniBench was forecast as "
+    "normal. Fix: set the repository variable AIB_TOURNAMENT_ID (Settings > "
+    "Secrets and variables > Actions > Variables) to the current seasonal "
     "tournament ID or slug."
 )
 
 
-def resolve_seasonal_tournament(client) -> int | str:
-    """The seasonal tournament to forecast on, environment override first.
+def resolve_seasonal_tournament() -> int | str:
+    """The seasonal tournament to forecast on. AIB_TOURNAMENT_ID is REQUIRED.
 
-    AIB_TOURNAMENT_ID exists because the Fall ID is not knowable today, and a
-    repository variable can be set without editing, testing and redeploying
-    code mid-season.
+    This used to fall back to the SDK's CURRENT_AI_COMPETITION_ID. That fallback
+    was removed on 2 Sept 2026 because it is a silent trap: poetry.lock pins
+    forecasting-tools 0.2.92, where the constant is frozen at Summer 2026, so
+    the fallback quietly aims a whole Fall season at a finished tournament.
+
+    The question-count check downstream catches a WRONG id — a typo has no
+    questions at all — but it cannot catch a RETIRED one. Summer still holds
+    328 questions; they are simply all closed, so the probe would report the
+    tournament as healthy. The fallback had to go rather than be guarded.
+
+    Requiring the variable closes both failures with no dates, no ID lists and
+    no maintenance, and stays correct at every future rollover. The cost is one
+    repository variable that has to be set before a season starts, which was
+    always true anyway.
     """
     override = os.environ.get("AIB_TOURNAMENT_ID", "").strip()
-    if override:
-        resolved = int(override) if override.isdigit() else override
-        logger.info("Seasonal tournament %r (from AIB_TOURNAMENT_ID)", resolved)
-        return resolved
-    resolved = client.CURRENT_AI_COMPETITION_ID
-    logger.info("Seasonal tournament %r (from the forecasting-tools SDK)", resolved)
+    if not override:
+        raise SystemExit(
+            "REFUSING TO RUN: AIB_TOURNAMENT_ID is not set. Tournament mode has "
+            "to be told which seasonal tournament to forecast — the SDK's "
+            "built-in constant is pinned to Summer 2026 and would forecast a "
+            "finished tournament without complaining. Set the repository "
+            "variable (Settings > Secrets and variables > Actions > Variables) "
+            "to the current seasonal tournament ID or slug."
+        )
+    resolved = int(override) if override.isdigit() else override
+    logger.info("Seasonal tournament %r (from AIB_TOURNAMENT_ID)", resolved)
     return resolved
-
-
-def season_is_stale(tournament_id, now=None) -> bool:
-    """True when the seasonal target is a tournament that has finished.
-
-    Deliberately returns a bool rather than raising: the caller still needs to
-    forecast MiniBench before failing the run. Exiting here would turn one
-    misconfiguration into two forfeited tournaments.
-    """
-    now = now if now is not None else datetime.now(timezone.utc)
-    if now < SEASON_GUARD_DATE:
-        return False
-    return tournament_id in STALE_SEASON_IDS
 
 
 
@@ -808,6 +816,8 @@ class SummerTemplateBot2026(ForecastBot):
             # settled quietly here.
             if self.get_llm("researcher") not in (None, "", "None", "no_research"):
                 if len(research.strip()) < 200:
+                    global EMPTY_RESEARCH_COUNT
+                    EMPTY_RESEARCH_COUNT += 1
                     logger.error(
                         "RESEARCH LOOKS EMPTY for %s (%d chars). This forecast is "
                         "coming from model weights, not from search.",
@@ -965,7 +975,19 @@ class SummerTemplateBot2026(ForecastBot):
             {question.options}
 
             The text you are parsing may prepend these options with some variation of "Option" which you should remove if not part of the option names I just gave you.
-            Additionally, you may sometimes need to parse a 0% probability. Please do not skip options with 0% but rather make it an entry in your final list with 0% probability.
+            Do not skip options. Every option above must appear in your final list.
+            NEVER emit exactly 0 for an option. Use 0.01 as the minimum for any
+            option you consider negligible, and make the probabilities sum to
+            exactly 1.00.
+
+            (Both rules exist because the library validates this list before we
+            ever see it: it rejects the whole sample if the probabilities sum
+            outside 0.99-1.01, and it clamps every option into 0.01-0.99 and
+            then rejects the sample if that clamping moved any option by more
+            than 0.05. A confident forecast across eight or more options with
+            literal zeros trips the second rule every time. A rejected sample is
+            not a smaller forecast, it is a lost one, and three lost samples
+            forfeit the question entirely.)
             """
         )
         reasoning = await self._invoke_default_llm(prompt)
@@ -1090,6 +1112,14 @@ class SummerTemplateBot2026(ForecastBot):
         )
         percentile_list = _sorted_percentiles(percentile_list)
         prediction = NumericDistribution.from_question(percentile_list, question)
+        # Force the CDF here, inside the per-sample coroutine, so a bad sample
+        # fails as a SAMPLE. NumericReport.aggregate_predictions expands every
+        # sample with a list comprehension, so a raise there kills the whole
+        # question even when four of five samples were perfect — which defeats
+        # the entire point of rejecting bad samples rather than repairing them.
+        # Several checks (CDF spacing, distance from bounds, log-scale zero
+        # point) only fire at expansion, not at construction. Audit, 1 Sept 2026.
+        prediction.get_cdf()
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
         )
@@ -1188,6 +1218,8 @@ class SummerTemplateBot2026(ForecastBot):
             for percentile in date_percentile_list
         ]
         prediction = NumericDistribution.from_question(percentile_list, question)
+        # Same reasoning as the numeric path: fail a bad sample as a sample.
+        prediction.get_cdf()
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
         )
@@ -1457,20 +1489,48 @@ if __name__ == "__main__":
     # summary printers below.
     client = MetaculusClient()
     seasonal_id = None
-    stale_season = False
+    seasonal_missing = False
     if run_mode == "tournament":
-        seasonal_id = resolve_seasonal_tournament(client)
-        stale_season = season_is_stale(seasonal_id)
-        if stale_season:
-            # Logged here so the reason appears in the run log next to the
-            # MiniBench work, and raised again at the very end so the workflow
-            # itself goes red. See the SEASON ROLLOVER block above.
-            logger.error(SEASON_STALE_MESSAGE)
+        seasonal_id = resolve_seasonal_tournament()
+        # Fetch the questions ourselves rather than letting forecast_on_tournament
+        # do it internally, because it discards the COUNT and the count is the
+        # only thing that distinguishes a working tournament from a dead one.
+        seasonal_questions = client.get_all_open_questions_from_tournament(
+            seasonal_id
+        )
+        logger.info(
+            "Seasonal tournament %r: %d open questions",
+            seasonal_id,
+            len(seasonal_questions),
+        )
+        if not seasonal_questions:
+            # Zero OPEN questions is normal — tournament questions accept
+            # forecasts for about 90 minutes and this runs every 10, so most
+            # runs legitimately find nothing. Zero questions AT ALL is not
+            # normal: it means the ID is wrong or the tournament has been
+            # retired, which is the four-month silent death. Distinguish the
+            # two with a second query that does not filter on status, and only
+            # pay for it on the runs that would otherwise have said nothing.
+            existing = asyncio.run(
+                client.get_questions_matching_filter(
+                    ApiFilter(allowed_tournaments=[seasonal_id])
+                )
+            )
+            if existing:
+                logger.info(
+                    "%r holds %d questions, none open right now. Normal between "
+                    "windows.",
+                    seasonal_id,
+                    len(existing),
+                )
+            else:
+                seasonal_missing = True
+                logger.error(SEASON_MISSING_MESSAGE.format(tournament=seasonal_id))
             seasonal_tournament_reports = []
         else:
             seasonal_tournament_reports = asyncio.run(
-                template_bot.forecast_on_tournament(
-                    seasonal_id, return_exceptions=True
+                template_bot.forecast_questions(
+                    seasonal_questions, return_exceptions=True
                 )
             )
         # MiniBench is keyed by a slug, so it survives the season rollover and
@@ -1515,7 +1575,7 @@ if __name__ == "__main__":
     # raise_errors=False, deliberately. The SDK's default is True and it raises
     # RuntimeError if ANY question errored — which skipped everything below it,
     # including the banner and the season-rollover message. Two independent
-    # auditors found this on 1 Sept 2026: the SEASON_STALE_MESSAGE written that
+    # auditors found this on 1 Sept 2026: the season-rollover message written that
     # morning was unreachable on any run with a single failed question, which
     # on recent evidence is most runs. We decide the exit code ourselves below.
     template_bot.log_report_summary(forecast_reports, raise_errors=False)
@@ -1542,8 +1602,19 @@ if __name__ == "__main__":
             len(successes),
         )
 
-    if stale_season:
-        raise SystemExit(SEASON_STALE_MESSAGE)
+    if seasonal_missing:
+        raise SystemExit(SEASON_MISSING_MESSAGE.format(tournament=seasonal_id))
+    if EMPTY_RESEARCH_COUNT:
+        # Logging this was not enough. Over four months nobody reads an INFO log
+        # on a green run, and a bot forecasting from model weights against a
+        # training cutoff is worth 3.6x Brier by Metaculus's own evidence. The
+        # forecasts have already been published — that is deliberate, a partial
+        # forecast beats none — but the run goes red so it cannot pass unseen.
+        raise SystemExit(
+            f"REFUSING TO PASS: {EMPTY_RESEARCH_COUNT} question(s) were forecast "
+            "with little or no research. Check the researcher model and the "
+            "OpenRouter balance."
+        )
     if forecast_reports and not successes:
         raise SystemExit(
             f"REFUSING TO PASS: all {len(failures)} questions failed and nothing "

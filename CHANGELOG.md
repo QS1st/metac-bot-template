@@ -12,6 +12,170 @@ different bot.
 
 ---
 
+## 2026-09-02 (morning) — AIB_TOURNAMENT_ID is now required, closing a hole I had just made
+
+The count-based guard written last night had a gap, found while researching
+something else. It probes whether the seasonal tournament contains any
+questions, which distinguishes a typo'd ID from a quiet hour — but **not** a
+tournament that has finished. Summer still holds 328 questions; they are simply
+all closed, so the probe would have reported it healthy. Forgetting to set
+`AIB_TOURNAMENT_ID` at all would have produced exactly the four-month silent
+failure the old date guard existed to prevent. One gap traded for another.
+
+- **The SDK fallback is removed.** `resolve_seasonal_tournament` no longer
+  returns `client.CURRENT_AI_COMPETITION_ID` when the variable is unset; it
+  refuses to run and says why. That constant is pinned to Summer 2026 by
+  poetry.lock, so the fallback was never a safe default — it was a trap wearing
+  a convenience's clothes.
+- Between them the two checks now cover both failures with no dates, no ID
+  lists and no maintenance: **unset** refuses, **wrong** returns zero questions
+  and refuses, **correct** runs. Still true at the Winter 2027 rollover.
+- `raises()` in the test harness now catches `SystemExit` as well as
+  `Exception`. It inherits from `BaseException`, so the old helper let it
+  through and killed the run instead of recording a pass — which is how a guard
+  that works can look like a test suite that doesn't.
+
+**Verified, not assumed:** the resources page states bot makers should submit
+only one forecast per question in the bot-only tournaments. Our dispatch now
+calls `forecast_questions` directly rather than `forecast_on_tournament`, so it
+was worth checking the filter survived the change. It does —
+`skip_previously_forecasted_questions` is applied inside `forecast_questions`
+itself, filtering on `question.already_forecasted`.
+
+**Also settled from the resources page (updated 31 Aug 2026), which closes an
+open unknown:** questions are released "at a rate of up to 5 questions at a
+time **from either series**… open for 1.5 hours each", and MiniBench rounds run
+~60 questions across a fortnight. So a round does **not** open 60 questions at
+once. Worst case in any run is about ten questions, roughly seven minutes —
+inside both the 10-minute cadence and the 20-minute timeout. The throughput
+ceiling flagged in the last audit is not a live problem, and a MiniBench round
+costs around $0.25 a day rather than needing the daily cap raised. Questions are
+also currently open for **3 hours**, not 1.5, while GitHub Actions latency is
+poor.
+
+79 unit tests.
+
+## 2026-09-02 — third audit round: the season guard retired, and three real forfeits closed
+
+Two auditors on the post-fix code. They found that three of my own fixes were
+not what this file claimed, and two faults nobody had raised. Corrections
+first, since they matter more than the additions.
+
+**RETIRED: the season guard, entirely.** `SEASON_GUARD_DATE`,
+`STALE_SEASON_IDS`, `SEASON_STALE_MESSAGE` and `season_is_stale` are gone. The
+guard tested what the tournament ID **is** — a fixed date plus a three-item
+denylist — rather than what it **does**. A typo in `AIB_TOURNAMENT_ID` walked
+straight past it: zero questions, green tick, every ten minutes for four
+months. It also expired, so the Winter 2027 rollover had no alarm at all.
+
+Replaced by a count check at the point of use. The seasonal questions are now
+fetched explicitly, so the count is visible; and because zero *open* questions
+is normal between windows — the cron runs every 10 minutes against a ~90 minute
+window — a second query without a status filter distinguishes "quiet hour" from
+"dead tournament ID". That probe only runs on the runs that would otherwise
+have said nothing. No dates, no ID list, no maintenance, and correct at every
+future rollover.
+
+**CORRECTED: the "100% headroom" claim was false for half the traffic.** I
+fixed the parser's retry multiplier and left the default model's.
+`LLM_ALLOWED_TRIES = 3` meant a worst case of 10 × 3 = **30 requests a minute
+against a limit of 20**, on the exact model that produced 87 rejections. Now 2.
+And the unit test computed the arithmetic for the parser bucket only — it
+asserted the half that passed and was silent on the half that failed. It now
+checks both.
+
+**CORRECTED: my reason for not raising on empty research was wrong.** I wrote
+that raising would discard samples and forfeit the question.
+`research_reports_per_question = 1`, so research runs once per question, not
+five times. Empty research is now counted and fails the run at the end. The
+forecasts are still published — a partial forecast beats none — but the run
+cannot pass unseen.
+
+**NEW: our own parsing instruction was manufacturing forfeits.** The prompt
+told the parser to emit 0% options. `PredictedOptionList`'s validator clamps
+every option into [0.01, 0.99] and then **rejects the sample** if that clamping
+moved anything by more than 0.05 — which happens once a question has seven or
+more options, and Metaculus multiple-choice questions routinely have eight to
+twelve. Worse, `STRUCTURE_OUTPUT_ALLOWED_TRIES = 1`, set two entries ago,
+removed the retry that used to absorb it. Three rejected samples forfeit the
+question. The instruction now asks for a 0.01 minimum and a sum of exactly
+1.00, and says why. Prompt only, no code — and it is what the retracted
+`MC_OPTION_FLOOR` was reaching for and could never have achieved, because the
+validator fires before our code sees the object.
+
+**NEW: one bad numeric sample was killing the whole question.**
+`NumericReport.aggregate_predictions` expands every sample's CDF in a list
+comprehension, so a single raise takes the question down even when four of five
+samples were sound — exactly defeating the design recorded here as "discards
+one sample and keeps the others". Several checks (CDF spacing, distance from
+bounds, log-scale zero point) fire only at expansion, not construction.
+`prediction.get_cdf()` is now called inside the per-sample coroutine on both
+the numeric and date paths, so a bad sample fails as a sample and the 3-of-5
+tolerance works as intended.
+
+**Held up under verification:** the two-bucket architecture, `capacity=1`, the
+dead-code removal, `enable_summarize_research`, the workflow variable split,
+and no new escaping bugs. One auditor independently confirmed the ambiguity
+regex was right to use `[ \t\r]` rather than the `\s` an earlier auditor
+suggested, since `\s` matches newlines.
+
+78 unit tests. The caps tests now lift their values from `main.py` instead of
+restating them.
+
+**Still open, recorded not fixed:** the ambiguity regex does not match
+decorated output (`**AMBIGUITY: HIGH**`, `- AMBIGUITY: HIGH`), and the season
+tier runs Claude Fable 5, which formats that way by habit — the guard could sit
+inert all season on the tier that matters. The publish path blocks the event
+loop with `time.sleep` and retries 400s that can never clear. The bot builds a
+second `MetaculusClient`, so client settings do not reach the publish path.
+Pacing caps a run at roughly 17 questions before it exceeds its own 10-minute
+cadence. `run_bot_on_metaculus_cup.yaml` must be deleted — the tier guard does
+not fire for that mode, so enabling it would run nano models on a scored public
+board.
+
+## 2026-09-01 (night) — the first clean run, and a measured cost
+
+Test Bot #13 on commit b5491e4, nine questions in the bot-testing-area at full
+five-prediction strength. **45 of 45 predictions landed. Zero rate-limit
+rejections, zero errors, zero forfeited questions.** The two previous runs
+managed 18/45 with 87 rejections and 29/45 with 63.
+
+The ambiguity guard is demonstrably alive rather than silently failing open:
+18 flag lines emitted, all `AMBIGUITY: LOW`, and no "flag not found" warnings.
+The HIGH path remains unobserved in the wild — the testing area's questions are
+genuinely unambiguous — but the machinery works.
+
+Pacing cost 6m16s against 2.5–4.5 minutes before, well inside the 20-minute
+timeout. That is the trade we chose.
+
+**Cost, measured rather than extrapolated.** $7.51 → $7.00, and the per-model
+ledger splits the roles for the first time now they are on different models:
+
+    Gemini 3.6 Flash (45 forecasts) .... $0.45    88%
+    Sonar (9 research calls) ........... $0.05    10%
+    gpt-oss-120b (45 parses) ........... $0.01     2%
+                                         -----
+    9 questions ........................ $0.51
+
+**$0.057 a question.** Forecasting is essentially the whole bill; moving the
+parser to gpt-oss-120b was worth it twice over, since 45 parses now cost a
+penny. Note the efficiency gain as well as the total: the previous run spent
+$0.54 for 29 landed predictions, this one $0.51 for 45 — about 45% cheaper per
+prediction that actually counted, because nothing was spent on work that was
+then rejected.
+
+What that implies, with the caveat that testing-area questions may be simpler
+than tournament ones:
+
+    60-question MiniBench round ........ ~$3.40
+    400-question season, trial tier .... ~$23
+    400-question season, season tier ... ~$200
+
+The last figure is why the Metaculus credits matter. The middle one is the more
+interesting: a full season on the trial configuration is affordable without
+them, at roughly 8 percent off the frontier on Metaculus's own leaderboard.
+That is a fallback we did not have this morning.
+
 ## 2026-09-01 (evening) — two independent audits, and three retractions
 
 Two auditors were briefed separately — one adversarial on cost and rate limits,
