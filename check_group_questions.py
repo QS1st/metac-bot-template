@@ -23,15 +23,23 @@ questions entirely (`SKIP_GROUP_QUESTIONS = True`).
 
 HOW TO RUN
 ----------
-This reads only. It posts nothing and forecasts nothing.
+This reads only. It posts nothing, forecasts nothing, and makes no LLM calls.
 
-It needs a Metaculus token in the environment, and it is only meaningful AFTER
-the bot has forecast at least once on the tournament you point it at.
+**Easiest — no local setup needed:** GitHub → Actions → **Check group
+questions** → Run workflow. Leave the tournament box as `bot-testing-area`. The
+verdict is printed on the run's summary page, so you do not need to open the
+logs.
 
-    cd <the repo>
+**Locally**, if you ever set up a development environment:
+
     export METACULUS_TOKEN=...        # or put it in .env
     poetry run python check_group_questions.py                  # bot-testing-area
     poetry run python check_group_questions.py minibench        # or a tournament
+
+It is only meaningful once the bot has forecast on the tournament at least
+once. The bot-testing-area is the default because it contains group questions
+by design, and our earlier Test Bot runs forecast them there before group
+skipping was introduced — so the evidence needed is already in place.
 
 READING THE RESULT
 ------------------

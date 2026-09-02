@@ -24,7 +24,8 @@
 > - Group questions are currently **skipped** (`SKIP_GROUP_QUESTIONS` in
 >   `main.py`) until we can show the SDK reports them as already forecast —
 >   re-forecasting one would breach the one-forecast-per-question rule. Run
->   `check_group_questions.py` to settle it.
+>   the **Check group questions** workflow (Actions tab) to settle it — it is
+>   read-only, makes no LLM calls, and prints its verdict on the run summary.
 > - `main.py` is generated: `patch_phase1.py` applies every change to the
 >   upstream template, and CI fails if the committed `main.py` does not match
 >   what the patch produces.
@@ -84,6 +85,7 @@ To run a different script under the same workflows, edit the `poetry run python 
 - `run_bot_on_tournament.yaml` — every 10 min on the live AIB tournament + MiniBench (currently disabled).
 - `heartbeat.yaml` — weekly; keeps the schedules alive past GitHub's 60-day inactivity cut-off.
 - `tests.yaml` — unit tests, plus a check that `main.py` matches what `patch_phase1.py` produces.
+- `check_group_questions.yaml` — manual, read-only diagnostic; see the note at the top.
 
 *(`run_bot_on_metaculus_cup.yaml` has been deleted in this fork — see the note at the top.)*
 
