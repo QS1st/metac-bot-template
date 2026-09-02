@@ -24,8 +24,14 @@ jobs:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
     # A hung run would otherwise hold the concurrency group for GitHub's 6-hour
     # default, blocking every subsequent run and silently costing us a whole
-    # afternoon of questions. A healthy full pass takes ~3 minutes.
-    timeout-minutes: 20
+    # afternoon of questions.
+    #
+    # 30, not 20. Pacing at 8 calls/minute with no burst means ~7.5s between
+    # default-model calls, so five predictions is ~37s a question and a run
+    # tops out around 16 questions at 20 minutes. Questions are gathered
+    # concurrently and finish near the end, so a timeout kill loses most of the
+    # batch rather than a tail of it. Late still scores; killed does not.
+    timeout-minutes: 30
     steps: # sets up the steps that will be run in order
       # setup repository with all necessary dependencies - keep as is
       - name: Check out repository

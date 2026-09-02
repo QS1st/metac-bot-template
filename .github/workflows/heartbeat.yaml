@@ -10,8 +10,20 @@ name: Heartbeat
 # silently switched off around day 60. No error, no failed run, no email.
 # We would find out from the leaderboard, weeks later.
 #
-# This commits a timestamp once a week, which resets that clock.
-# It makes no API calls and costs nothing on a public repository.
+# This commits a timestamp once a week, which should reset that clock — and
+# then, belt and braces, explicitly re-enables the schedules via the API.
+#
+# Why both: GitHub documents the 60-day rule, and separately documents that
+# events triggered by GITHUB_TOKEN "will not create a new workflow run". That
+# second restriction is scoped to CREATING RUNS, and nothing in the docs says
+# whether a GITHUB_TOKEN push counts as "repository activity" for the
+# inactivity clock. An audit on 2 Sept 2026 could not settle it from primary
+# sources, and a season is twice the length of the clock. Rather than bet on
+# an undocumented answer, the enable call makes the question irrelevant: it is
+# idempotent, costs nothing, and works whether or not the commit counts.
+#
+# Note this workflow is itself scheduled, so it is subject to the same rule —
+# which is why it re-enables ITSELF as well as the tournament workflow.
 
 on:
   schedule:
@@ -21,6 +33,7 @@ on:
 
 permissions:
   contents: write          # required to push the timestamp commit
+  actions: write           # required to re-enable the schedules below
 
 concurrency:
   group: ${{ github.workflow }}
@@ -48,3 +61,17 @@ jobs:
           # which is the whole point of the exercise.
           git commit --allow-empty -m "chore: heartbeat (keeps scheduled workflows enabled)"
           git push
+
+      - name: Re-enable the scheduled workflows
+        # Idempotent: enabling an already-enabled workflow is a no-op. gh is
+        # preinstalled on ubuntu-latest. Deliberately does NOT fail the run if
+        # a workflow is absent — a missing file is a deletion we meant, and a
+        # red heartbeat would be a false alarm on the one alarm channel we have.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in run_bot_on_tournament.yaml heartbeat.yaml; do
+            echo "Re-enabling $wf"
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$wf/enable" \
+              || echo "  (could not enable $wf — continuing)"
+          done
