@@ -425,7 +425,20 @@ def run():
     # dead ID. The probe distinguishes them and only runs when we would
     # otherwise have exited silently.
     check("an existence probe runs when nothing is open",
-          bool(_re.search(r"ApiFilter\(allowed_tournaments=\[tournament_id\]\)", src)), True)
+          bool(_re.search(r"ApiFilter\(\s*allowed_tournaments=\[tournament_id\]", src)), True)
+    check("the probe looks at the SAME population as the fetch",
+          bool(_re.search(r'group_question_mode="unpack_subquestions"', src)), True)
+
+    print("\n  -- one client, shared with the publish path --")
+    # ForecastBot builds its own client unless handed one, so anything set here
+    # never reached publishing — which is where the blocking sleeps are.
+    # Code lines only — a comment elsewhere shows the verification snippet.
+    check("exactly one MetaculusClient is constructed in code",
+          len(_re.findall(r"^\s*[^#\s].*MetaculusClient\(", src, _re.M)), 1)
+    check("and it is handed to the bot",
+          bool(_re.search(r"metaculus_client=client", src)), True)
+    check("with a shorter inter-request sleep",
+          bool(_re.search(r"sleep_seconds_between_requests=1\.0", src)), True)
     check("ApiFilter is imported", bool(_re.search(r"^    ApiFilter,$", src, _re.M)), True)
     check("a missing tournament is reported as a problem",
           bool(_re.search(r"SEASON_MISSING_MESSAGE\.format\(", src)), True)
@@ -464,6 +477,46 @@ def run():
         _os.environ.pop("AIB_TOURNAMENT_ID", None)
         if saved is not None:
             _os.environ["AIB_TOURNAMENT_ID"] = saved
+
+    print("\n  -- the ambiguity flag survives markdown --")
+    # The season tier runs claude-fable-5, which bolds headings by habit. The
+    # tighter first pattern matched none of these, so the guard could have sat
+    # inert for four months on the only tier that scores.
+    for label, text in [
+        ("bold whole line", "**AMBIGUITY: HIGH**"),
+        ("bold label", "**AMBIGUITY:** HIGH"),
+        ("bold value", "AMBIGUITY: **HIGH**"),
+        ("bullet", "- AMBIGUITY: HIGH"),
+        ("heading", "### AMBIGUITY: HIGH"),
+        ("trailing stop", "AMBIGUITY: HIGH."),
+        ("italics", "_AMBIGUITY: HIGH_"),
+        ("blockquote", "> AMBIGUITY: HIGH"),
+    ]:
+        check(f"decorated flag still tightens: {label}", caps(text), TIGHT)
+    # ...and the loosening must NOT reintroduce the failure line-anchoring
+    # exists to prevent: a model restating the instruction inline.
+    check("restated inline STILL does not trigger",
+          caps("I must output either AMBIGUITY: LOW or AMBIGUITY: HIGH."), NORMAL)
+    check("trailing prose on the line does not trigger",
+          caps("AMBIGUITY: HIGH (competing readings)"), NORMAL)
+    check("bulleted options then a real answer takes the answer",
+          caps("Options:\n- AMBIGUITY: LOW\n- AMBIGUITY: HIGH\nReasoning.\nAMBIGUITY: LOW"), NORMAL)
+
+    print("\n  -- group questions are skipped until skipping is proven --")
+    # A rule breach is not worth a few extra questions. Metaculus requires one
+    # forecast per question in bot-only tournaments, and we cannot yet show the
+    # SDK reports group subquestions as already forecast.
+    drop, mods5 = load("drop_group_questions", consts=("SKIP_GROUP_QUESTIONS",))
+
+    class GQ:
+        def __init__(self, gid): self.question_ids_of_group = gid
+
+    check("group questions are excluded by default", mods5.SKIP_GROUP_QUESTIONS, True)
+    kept = drop([GQ(None), GQ([1, 2]), GQ(None)], "Seasonal")
+    check("only non-group questions survive", len(kept), 2)
+    check("a list with no groups is untouched", len(drop([GQ(None)], "Seasonal")), 1)
+    check("an empty list survives", drop([], "Seasonal"), [])
+    check("the switch is documented as reversible", "Flip this to False once verified" in src, True)
 
     print("\n  -- the tournament must actually BE a bot tournament --")
     # The count check alone cannot tell a typo from a correct ID: Metaculus

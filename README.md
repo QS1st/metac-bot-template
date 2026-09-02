@@ -1,4 +1,39 @@
 # Simple Metaculus forecasting bot
+
+> ### ⚠️ This is a MODIFIED fork — read this before running it
+>
+> The rest of this README is Metaculus's template documentation, and most of it
+> still applies. These are the ways this fork differs. They matter because the
+> bot **refuses to run** without the first one.
+>
+> **Two repository VARIABLES (not secrets), under
+> `Settings → Secrets and variables → Actions → Variables`:**
+>
+> | Variable | Needed | What it does |
+> |---|---|---|
+> | `AIB_TOURNAMENT_ID` | **REQUIRED for tournament mode** | The seasonal tournament ID or slug. There is deliberately no fallback: the SDK constant is pinned to Summer 2026, so a fallback would silently forecast a finished tournament for a whole season. Unset, the bot forecasts MiniBench, skips the seasonal half and fails the run. |
+> | `MODEL_TIER` | optional | `free` \| `test` \| `trial` \| `season`. Defaults to `test`. A scored tournament refuses to run on anything but `trial` or `season`. |
+> | `TEST_MODEL_TIER` | optional | The same, but only for the `Test Bot` workflow — deliberately separate, so a cost probe cannot reconfigure the live bot. |
+>
+> **Other differences from the upstream template:**
+> - The tournament workflow runs **every 10 minutes**, not 20, and is currently
+>   **disabled** — enable it deliberately when a season starts.
+> - `run_bot_on_metaculus_cup.yaml` has been **deleted**. The tier guard does not
+>   cover that mode, so enabling it would have run cheap models on a scored
+>   public board. Do not restore it without extending the guard.
+> - Group questions are currently **skipped** (`SKIP_GROUP_QUESTIONS` in
+>   `main.py`) until we can show the SDK reports them as already forecast —
+>   re-forecasting one would breach the one-forecast-per-question rule. Run
+>   `check_group_questions.py` to settle it.
+> - `main.py` is generated: `patch_phase1.py` applies every change to the
+>   upstream template, and CI fails if the committed `main.py` does not match
+>   what the patch produces.
+>
+> **Every behavioural change, and the reasoning behind it, is recorded in
+> [CHANGELOG.md](CHANGELOG.md)** — including changes that were later retracted.
+> That file is the disclosure document Metaculus asks prize-winning bot makers
+> for.
+
 This repository contains a simple bot meant to get you started with creating your own bot for the AI Forecasting Tournament. Go to https://www.metaculus.com/futureeval/participate/ for more info and tournament rules (and then go to the  "Getting Started" section of our [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#want-to-join-the-ai-forecasting-benchmark) page).
 
 **Brand new to this?** You can get a working bot running in about 5 minutes without writing a single line of code — just fork this repo, paste two API keys into GitHub, and click "Run workflow". See **[Quick start](#quick-start--fork-and-use-github-actions)** below.
@@ -19,7 +54,7 @@ If you run into trouble, reach out to `ben [at] metaculus [.com]`
 
 
 ## Quick start -> Fork and use Github Actions
-The easiest way to use this repo is to fork it, paste in two API keys, and click "Run workflow". After that, the bot will keep forecasting on new questions automatically every 20 minutes — no local setup needed.
+The easiest way to use this repo is to fork it, paste in two API keys, and click "Run workflow". After that, the bot will keep forecasting on new questions automatically. *(In this fork the cadence is every 10 minutes, and the workflow ships disabled — see the note at the top.)*
 
 1) **Fork the repository** — go to the [repository](https://github.com/Metaculus/metac-bot-template) and click **Fork** in the top right.
 2) **Add your two API keys as repository secrets** — in your fork, go to `Settings → Secrets and variables → Actions → New repository secret`. Add these two (names must match exactly, all caps):
@@ -27,7 +62,7 @@ The easiest way to use this repo is to fork it, paste in two API keys, and click
    - **`OPENROUTER_API_KEY`** — get free credits via [this form](https://forms.gle/aQdYMq9Pisrf1v7d8), or make your own key on [OpenRouter](https://openrouter.ai/). You can also use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`, `ASKNEWS_SECRET`, etc. — these all work out of the box if you set them.
 3) **Enable Actions** — click the `Actions` tab, then click `I understand my workflows, go ahead and enable them`.
 4) **Run the test workflow to confirm everything works** — go to `Actions → Test Bot → Run workflow → Run workflow` (green button). This forecasts on whatever's currently open in the [bot-testing-area tournament](https://www.metaculus.com/tournament/bot-testing-area/) so you can verify your setup posts forecasts to Metaculus end-to-end. Once the run finishes (~3–5 min), check your bot's profile on Metaculus to confirm the forecasts landed.
-5) **You're done!** The `Forecast on new AI tournament questions` workflow is already enabled and will run every 20 minutes, picking up any new tournament questions and skipping ones it has already forecast on.
+5) **You're done!** The `Forecast on new AI tournament questions` workflow picks up new tournament questions and skips ones it has already forecast on. *(In this fork it runs every 10 minutes and is currently **disabled** — enable it deliberately, and set `AIB_TOURNAMENT_ID` first, or the seasonal half will refuse.)*
 
 To pause your bot, go to `Actions → Forecast on new AI tournament questions → ... (top right) → Disable workflow`.
 
@@ -46,8 +81,11 @@ Instructions for getting your METACULUS_TOKEN, OPENROUTER_API_KEY, or optional s
 ## Changing the Github automation
 To run a different script under the same workflows, edit the `poetry run python main.py` line in the appropriate file under `.github/workflows/` and replace `main.py` with your script. The workflows that exist:
 - `test_bot.yaml` — manual-trigger smoke test against the bot-testing-area tournament.
-- `run_bot_on_tournament.yaml` — every 20 min on the live AIB tournament + MiniBench.
-- `run_bot_on_metaculus_cup.yaml` — every 2 days on the Metaculus Cup.
+- `run_bot_on_tournament.yaml` — every 10 min on the live AIB tournament + MiniBench (currently disabled).
+- `heartbeat.yaml` — weekly; keeps the schedules alive past GitHub's 60-day inactivity cut-off.
+- `tests.yaml` — unit tests, plus a check that `main.py` matches what `patch_phase1.py` produces.
+
+*(`run_bot_on_metaculus_cup.yaml` has been deleted in this fork — see the note at the top.)*
 
 **To run `main_with_no_framework.py` via GitHub Actions instead of `main.py`:** open the workflow file you want and change `poetry run python main.py` to `poetry run python main_with_no_framework.py`. That's the only change required.
 
@@ -103,11 +141,6 @@ You'll see a one-line startup banner, forecasting progress logs, then a `🎉 Bo
 **Forecast on live AIB tournament + MiniBench:**
 ```bash
 poetry run python main.py --mode tournament
-```
-
-**Forecast on the Metaculus Cup:**
-```bash
-poetry run python main.py --mode metaculus_cup
 ```
 
 **Run the no-framework reference implementation instead:**

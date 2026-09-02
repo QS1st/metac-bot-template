@@ -12,6 +12,75 @@ different bot.
 
 ---
 
+## 2026-09-02 (fifth audit round) — the deferred list, and one thing above it
+
+An audit of the items previously noted-but-not-fixed. Its first finding was not
+on the list, and outranks everything that was.
+
+**The alarm channel had never been tested.** Every guard in this file is a
+`SystemExit` that turns one run red. Nothing established that red reaches a
+human — and GitHub sends scheduled-workflow notifications to whoever *created*
+the workflow, with ownership moving if someone edits the cron or re-enables a
+disabled workflow. Confirmed empirically: failure emails do arrive in the
+inbox. Recorded because the whole design rests on it, and because it will need
+re-checking after the September rollover, when re-enabling the tournament
+workflow is exactly the kind of act that reassigns the recipient.
+
+**GROUP QUESTIONS ARE NOW SKIPPED, deliberately, until skipping is proven.**
+`skip_previously_forecasted_questions` reads `already_forecasted`, which the
+SDK fills from `question_json["my_forecasts"]["history"]`. For an unpacked group
+subquestion that json is deep-copied from the group payload, so the field
+exists only if Metaculus puts `my_forecasts` on each subquestion. The SDK
+patches exactly this for CONDITIONAL questions and does nothing for groups,
+which reads like the case was never considered. If it fails open the bot
+re-forecasts group subquestions 144 times a day — wasted spend, and a breach of
+"only one forecast per question" in bot-only tournaments. A rule breach is not
+worth a few extra questions. `check_group_questions.py` settles it in one
+read-only run against a live token; `SKIP_GROUP_QUESTIONS` flips back when it
+does.
+
+**The heartbeat no longer depends on an undocumented answer.** GitHub documents
+the 60-day inactivity rule, and separately documents that `GITHUB_TOKEN` events
+"will not create a new workflow run" — but never says whether such a push counts
+as repository activity for the clock. Rather than bet on it for a season twice
+the length of the clock, the heartbeat now also calls the API to re-enable both
+scheduled workflows. Idempotent, free, and correct either way.
+
+**One `MetaculusClient`, shared with the publish path.** `ForecastBot` builds
+its own unless handed one, so nothing we set ever reached publishing — which is
+where `sleep_seconds_between_requests` lives, as a **blocking** `time.sleep()`
+inside an async method that freezes the whole event loop. Now 1.0s rather than
+3.5, cutting routine blocking roughly fourfold.
+
+**The ambiguity guard matched no decorated output.** Proven: `**AMBIGUITY:
+HIGH**`, `- AMBIGUITY: HIGH`, `### AMBIGUITY: HIGH`, a trailing full stop and
+italics all failed to match, and the SEASON tier runs claude-fable-5, which
+bolds by habit — so the guard could have sat inert for four months on the only
+tier that scores. The character classes now tolerate decoration while keeping
+line-anchoring and last-match-wins, so the restated-instruction failure they
+were built to defeat still does not trigger. Thirteen cases verified, eleven of
+them new tests.
+
+Honestly weighted, though: a miss only fails to *tighten* a forecast, and all
+18 observed flags were LOW. This was a tail risk, not the steady bleed the
+earlier note implied.
+
+**Also:** `timeout-minutes` 20 → 30, which raises the per-run ceiling from about
+16 questions to 32 — pacing at 8/min with no burst is ~37s a question, and a
+timeout kill loses most of a batch rather than a tail, because questions are
+gathered and finish together. And the existence probe now uses
+`group_question_mode="unpack_subquestions"`, so it looks at the same population
+as the fetch; `ApiFilter` defaults to `"exclude"`, which could have produced a
+false "NOT FOUND" on a tournament whose newest posts were all groups.
+
+**Explicitly left alone:** the `nest_asyncio` dependency. It cannot be removed —
+the SDK's own `forecast_on_tournament` calls a synchronous method that runs
+`asyncio.run` inside a running loop, which is impossible without the
+monkeypatch. Two standing constraints instead of code: do not unpin
+`nest-asyncio`, and do not move off Python 3.11 without re-testing.
+
+117 unit tests.
+
 ## 2026-09-02 (fourth audit round) — the guard that let a typo through
 
 An independent verification pass on the morning's fixes. It found that the

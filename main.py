@@ -657,6 +657,52 @@ def tournament_slug_problem(tournament_id, questions, label: str) -> str | None:
     )
 
 
+# GROUP QUESTIONS ARE SKIPPED UNTIL SKIPPING IS PROVEN TO WORK ON THEM.
+#
+# skip_previously_forecasted_questions is the ONLY thing stopping a 10-minute
+# cron re-forecasting the same question all season, and it reads
+# question.already_forecasted, which the SDK fills from
+# question_json["my_forecasts"]["history"]. For an unpacked GROUP subquestion
+# that json is deep-copied straight from the group payload, so the field is
+# present only if Metaculus puts my_forecasts on each subquestion. Nobody
+# knows whether it does: the SDK explicitly patches this for CONDITIONAL
+# questions and does nothing equivalent for groups, which reads like the case
+# was never considered.
+#
+# If it fails open we would re-forecast group subquestions 144 times a day —
+# wasted spend, and a breach of Metaculus's "only one forecast per question"
+# rule for bot-only tournaments. A rule breach is not a risk worth carrying for
+# a few extra questions, so groups are excluded until the check below says
+# otherwise. Flip this to False once verified.
+#
+# To verify (needs the Metaculus token, after a forecast has landed):
+#   qs = MetaculusClient().get_all_open_questions_from_tournament("minibench")
+#   for q in qs:
+#       print(q.id_of_question, q.question_ids_of_group is not None,
+#             q.already_forecasted)
+# Any row that is part of a group, that you have already forecast, and that
+# still reports already_forecasted == False, means skipping fails open.
+SKIP_GROUP_QUESTIONS = True
+
+
+def drop_group_questions(questions, label: str):
+    """Remove unpacked group subquestions. See SKIP_GROUP_QUESTIONS."""
+    if not SKIP_GROUP_QUESTIONS:
+        return questions
+    kept = [q for q in questions if getattr(q, "question_ids_of_group", None) is None]
+    dropped = len(questions) - len(kept)
+    if dropped:
+        logger.warning(
+            "%s: skipping %d group subquestion(s). Deliberate — see "
+            "SKIP_GROUP_QUESTIONS. We cannot yet prove the SDK reports them as "
+            "already forecast, and re-forecasting one would breach the "
+            "one-forecast-per-question rule.",
+            label,
+            dropped,
+        )
+    return kept
+
+
 def fetch_and_verify_tournament(client, tournament_id, label: str):
     """Return (open_questions, problem_message_or_None).
 
@@ -668,6 +714,7 @@ def fetch_and_verify_tournament(client, tournament_id, label: str):
     logger.info(
         "%s tournament %r: %d open questions", label, tournament_id, len(questions)
     )
+    questions = drop_group_questions(questions, label)
     sample = questions
     if not questions:
         # Zero OPEN questions is normal. Questions accept forecasts for about
@@ -676,7 +723,16 @@ def fetch_and_verify_tournament(client, tournament_id, label: str):
         # query on the runs that would otherwise have said nothing at all.
         sample = asyncio.run(
             client.get_questions_matching_filter(
-                ApiFilter(allowed_tournaments=[tournament_id])
+                # unpack_subquestions to match what the fetch above uses.
+                # ApiFilter defaults to "exclude", which drops group posts both
+                # server-side and locally — so the probe looked at a different
+                # population from the forecast set, and a tournament whose
+                # newest posts were all groups would have produced a false
+                # "NOT FOUND". Audit, 2 Sept 2026.
+                ApiFilter(
+                    allowed_tournaments=[tournament_id],
+                    group_question_mode="unpack_subquestions",
+                )
             )
         )
         if not sample:
@@ -1497,13 +1553,23 @@ def caps_for_reasoning(reasoning: str) -> tuple[float, float]:
     is the safe direction under a scoring rule this asymmetric.
     """
     text = reasoning or ""
-    # Spaces, tabs and a stray carriage return only. Deliberately NOT a class
-    # containing a newline escape: this same text is embedded in a non-raw
-    # string inside patch_phase1.py, where a backslash-n would become a real
-    # newline and silently corrupt both the comment and the pattern. It did,
-    # on 1 Sept 2026, and the build check caught it.
+    # Tolerates markdown decoration: **AMBIGUITY: HIGH**, "- AMBIGUITY: HIGH",
+    # "### AMBIGUITY: HIGH", a trailing full stop, italics, blockquotes. The
+    # tighter first version matched none of those, and the SEASON tier runs
+    # claude-fable-5, which bolds headings by habit — so the guard could have
+    # sat inert for four months on the only tier that scores. Audit, 2 Sept.
+    #
+    # Line-anchoring and last-match-wins are retained, and still refuse the
+    # restated instruction ("I must output either AMBIGUITY: LOW or AMBIGUITY:
+    # HIGH.") that they were introduced to defeat: the line must BEGIN with the
+    # marker, decoration aside. Verified against thirteen cases.
+    #
+    # Deliberately NO newline escape in any class: this text is embedded in a
+    # non-raw string inside patch_phase1.py, where a backslash-n becomes a real
+    # newline and silently corrupts both comment and pattern. It did, on 1 Sept
+    # 2026. Every backslash below is doubled over there.
     flags = re.findall(
-        r"^[ \t\r]*AMBIGUITY[ \t\r]*:[ \t\r]*(HIGH|LOW)[ \t\r]*$",
+        r"^[ \t\r>#*_-]*AMBIGUITY[ \t\r*_]*:[ \t\r*_]*(HIGH|LOW)[ \t\r*_.!:]*$",
         text,
         re.IGNORECASE | re.MULTILINE,
     )
@@ -1574,7 +1640,22 @@ if __name__ == "__main__":
     # Configure the bot. The `llms=` block below is commented out to use
     # whichever default models forecasting-tools picks based on your env vars;
     # uncomment and edit to pin specific models.
+    # ONE client, built before the bot and handed to it. ForecastBot otherwise
+    # constructs its own, so anything set here never reached the publish path —
+    # which is where the blocking sleeps live. Audit, 2 Sept 2026.
+    #
+    # sleep_seconds_between_requests defaults to 3.5 and is a BLOCKING
+    # time.sleep() inside an async publish method, so it freezes the whole event
+    # loop, not just the calling question. Two requests per published question
+    # is ~8s of frozen loop each. Metaculus's API is not tight enough at two
+    # requests a question for 3.5s to be load-bearing.
+    client = MetaculusClient(
+        sleep_seconds_between_requests=1.0,
+        sleep_jitter_seconds=0.5,
+    )
+
     template_bot = SummerTemplateBot2026(
+        metaculus_client=client,
         research_reports_per_question=1,
         predictions_per_research_report=5,
         use_research_summary_to_forecast=False,
@@ -1602,7 +1683,6 @@ if __name__ == "__main__":
     # Dispatch on mode. Each branch produces a list of ForecastReport (or
     # exceptions, since return_exceptions=True) which then flows into the
     # summary printers below.
-    client = MetaculusClient()
     seasonal_id = None
     problems: list[str] = []
     if run_mode == "tournament":
