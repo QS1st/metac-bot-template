@@ -56,7 +56,10 @@ jobs:
         env:
           # Repository VARIABLES (not secrets), and not visible to the process
           # unless passed through here — an unset variable renders as an empty
-          # string, which main.py treats as "use the default".
+          # string. AIB_TOURNAMENT_ID is REQUIRED in tournament mode: unset, the
+          # bot forecasts MiniBench, skips the seasonal half and fails the run.
+          # There is no longer a fallback to the SDK constant, which was pinned
+          # to Summer 2026 and would have forecast a finished tournament.
           #   AIB_TOURNAMENT_ID  the seasonal tournament, for the September
           #                      rollover the pinned SDK cannot do for us.
           #   MODEL_TIER         free | test | season, so the tier can change
