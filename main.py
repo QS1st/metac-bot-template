@@ -61,6 +61,13 @@ import os  # noqa: E402
 # exit decision is made in __main__.
 EMPTY_RESEARCH_COUNT = 0
 
+# The run fails only if BOTH are exceeded: a minority of thin research is
+# normal on niche questions, a majority means the researcher is broken. Failing
+# on a single instance manufactures red-fatigue, which costs more than it saves
+# when red is the only alarm this project has.
+EMPTY_RESEARCH_MIN_TO_FAIL = 3
+EMPTY_RESEARCH_FAIL_RATE = 0.5
+
 # =============================================================================
 # PHASE 1 CONFIGURATION  —  all tunables live here, nowhere else.
 #
@@ -361,7 +368,19 @@ TRIAL_MODELS = {
 #      unit at a time. The 60-second average held while the instantaneous rate
 #      was ~15 per second — the very burst shape that triggered the throttle.
 #      Capacity 1 gives one request every six seconds and no burst at all.
-PER_MODEL_RPM = 10
+#
+# REVISED AGAIN 2 Sept 2026, and made tier-aware. Two reasons:
+#   1. 10 x LLM_ALLOWED_TRIES(2) = 20 against a limit of 20 is a boundary, not
+#      a margin, and retries are CORRELATED with being at the limit — the thing
+#      that triggers a retry is usually the 429 itself. 8 x 2 = 16 leaves room.
+#   2. The free tier keeps LLM_ALLOWED_TRIES = 6, because free-tier 429s are
+#      transient and retrying is the right response there. At 10/min that is a
+#      worst case of 60 against a limit of 20 — the unit test caught it, having
+#      been extended to check BOTH buckets rather than only the parser. The
+#      free tier was unsafe by our own stated standard and nobody had noticed,
+#      because the arithmetic was only ever checked at the default tier.
+#      3 x 6 = 18 holds.
+PER_MODEL_RPM = 3 if MODEL_TIER == "free" else 8
 PER_MODEL_BURST = 1
 
 # Retries inside the parser. The SDK default is 2, and structure_output wraps
@@ -558,8 +577,9 @@ def build_llm_config():
 #   GitHub -> Settings -> Secrets and variables -> Actions -> Variables -> New
 #   Name:  AIB_TOURNAMENT_ID
 #   Value: the Fall 2026 project ID (e.g. 33099) or its slug
-# Until that is set, the guard below skips the seasonal half, still forecasts
-# MiniBench, and then fails the run so the workflow turns red.
+# Until that is set, MiniBench is forecast as normal, the seasonal half is
+# skipped, and the run fails so the workflow turns red. MiniBench runs FIRST in
+# the dispatch precisely so an unset variable cannot forfeit it.
 # =============================================================================
 
 # The old guard was a fixed date plus a three-item denylist of known-stale IDs.
@@ -573,18 +593,111 @@ def build_llm_config():
 # Replaced by a question COUNT check at the point of use. It needs no dates, no
 # ID list and no maintenance, and it is correct at every future rollover.
 SEASON_MISSING_MESSAGE = (
-    "SEASONAL TOURNAMENT NOT FOUND: {tournament!r} contains no questions at "
+    "{label} TOURNAMENT NOT FOUND: {tournament!r} contains no questions at "
     "all. That is a wrong or retired tournament ID, not a quiet hour — a live "
-    "tournament always has questions even when none are currently open. The "
-    "seasonal half of this run forecast NOTHING. MiniBench was forecast as "
-    "normal. Fix: set the repository variable AIB_TOURNAMENT_ID (Settings > "
-    "Secrets and variables > Actions > Variables) to the current seasonal "
-    "tournament ID or slug."
+    "tournament always has questions even when none are currently open. That "
+    "half of this run forecast NOTHING. Fix: set the repository variable "
+    "AIB_TOURNAMENT_ID (Settings > Secrets and variables > Actions > "
+    "Variables) to the current seasonal tournament ID or slug."
 )
 
 
-def resolve_seasonal_tournament() -> int | str:
-    """The seasonal tournament to forecast on. AIB_TOURNAMENT_ID is REQUIRED.
+# Slug fragments that identify a Metaculus BOT tournament. Every question the
+# API returns carries the slugs of the tournaments it belongs to
+# (MetaculusQuestion.tournament_slugs, filled from projects.tournament[].slug),
+# so checking this costs no extra request.
+#
+# Why it exists: the question-count check alone cannot tell a typo from a
+# correct ID. Metaculus project IDs are dense — 32916, 33021, 33022 — so a
+# transposed digit usually lands on ANOTHER REAL PROJECT, which has questions,
+# passes the count check, and would have us forecasting into a tournament we
+# are not entered in. Green, every ten minutes, for four months. Found by
+# audit on 2 Sept 2026, in the guard written to prevent exactly that.
+#
+# Fragments rather than names because Metaculus has renamed the series over
+# time: aibq3, aibq4, fall-aib-2025, spring-aib-2026, summer-futureeval-2026,
+# minibench. Every one contains one of these.
+BOT_TOURNAMENT_SLUG_MARKERS = ("aib", "futureeval", "minibench")
+
+
+def tournament_slug_problem(tournament_id, questions, label: str) -> str | None:
+    """None if these questions belong to a bot tournament, else why not.
+
+    Fails SAFE on missing metadata: if no question carries a slug we warn and
+    allow the run, because refusing on absent data would turn an API change
+    into a four-month outage of our own making.
+    """
+    slugs = {
+        s.lower()
+        for q in questions
+        for s in (getattr(q, "tournament_slugs", None) or [])
+    }
+    if not slugs:
+        logger.warning(
+            "%s tournament %r returned questions carrying no tournament slugs, "
+            "so it could not be verified as a bot tournament. Allowing the run.",
+            label,
+            tournament_id,
+        )
+        return None
+    if any(marker in s for s in slugs for marker in BOT_TOURNAMENT_SLUG_MARKERS):
+        logger.info(
+            "%s tournament %r verified as a bot tournament: %s",
+            label,
+            tournament_id,
+            sorted(slugs),
+        )
+        return None
+    return (
+        f"WRONG TOURNAMENT: {label} target {tournament_id!r} resolves to "
+        f"{sorted(slugs)}, none of which looks like a Metaculus bot tournament "
+        f"(expected a slug containing one of {BOT_TOURNAMENT_SLUG_MARKERS}). "
+        "That is almost certainly a mistyped AIB_TOURNAMENT_ID landing on a "
+        "real but unrelated project. Forecasting was skipped."
+    )
+
+
+def fetch_and_verify_tournament(client, tournament_id, label: str):
+    """Return (open_questions, problem_message_or_None).
+
+    Fetches explicitly rather than letting forecast_on_tournament do it,
+    because that discards the question COUNT, and the count is what separates a
+    working tournament from a dead one.
+    """
+    questions = client.get_all_open_questions_from_tournament(tournament_id)
+    logger.info(
+        "%s tournament %r: %d open questions", label, tournament_id, len(questions)
+    )
+    sample = questions
+    if not questions:
+        # Zero OPEN questions is normal. Questions accept forecasts for about
+        # 90 minutes and this runs every 10, so most runs legitimately find
+        # nothing. Zero questions AT ALL is not normal. Only pay for the second
+        # query on the runs that would otherwise have said nothing at all.
+        sample = asyncio.run(
+            client.get_questions_matching_filter(
+                ApiFilter(allowed_tournaments=[tournament_id])
+            )
+        )
+        if not sample:
+            return [], SEASON_MISSING_MESSAGE.format(
+                tournament=tournament_id, label=label
+            )
+        logger.info(
+            "%r holds %d questions, none open right now. Normal between windows.",
+            tournament_id,
+            len(sample),
+        )
+    return questions, tournament_slug_problem(tournament_id, sample, label)
+
+
+def resolve_seasonal_tournament():
+    """Return (tournament_id_or_None, problem_or_None). AIB_TOURNAMENT_ID is REQUIRED.
+
+    Returns a problem rather than raising, so the caller can still forecast
+    MiniBench before failing the run. The first version raised here, which meant
+    an unset variable forfeited MiniBench too — a scored series, keyed by a slug
+    that survives the rollover, that was working perfectly. Audit, 2 Sept 2026.
 
     This used to fall back to the SDK's CURRENT_AI_COMPETITION_ID. That fallback
     was removed on 2 Sept 2026 because it is a silent trap: poetry.lock pins
@@ -603,8 +716,8 @@ def resolve_seasonal_tournament() -> int | str:
     """
     override = os.environ.get("AIB_TOURNAMENT_ID", "").strip()
     if not override:
-        raise SystemExit(
-            "REFUSING TO RUN: AIB_TOURNAMENT_ID is not set. Tournament mode has "
+        return None, (
+            "REFUSING TO PASS: AIB_TOURNAMENT_ID is not set. Tournament mode has "
             "to be told which seasonal tournament to forecast — the SDK's "
             "built-in constant is pinned to Summer 2026 and would forecast a "
             "finished tournament without complaining. Set the repository "
@@ -613,7 +726,7 @@ def resolve_seasonal_tournament() -> int | str:
         )
     resolved = int(override) if override.isdigit() else override
     logger.info("Seasonal tournament %r (from AIB_TOURNAMENT_ID)", resolved)
-    return resolved
+    return resolved, None
 
 
 class SummerTemplateBot2026(ForecastBot):
@@ -1007,12 +1120,15 @@ class SummerTemplateBot2026(ForecastBot):
         # Our version could only ever move a probability by ~2e-4. It read like
         # protection and provided none, which is worse than nothing.
         #
-        # The real multiple-choice risk is the opposite one and is NOT handled:
-        # that same validator RAISES if the parsed probabilities sum outside
-        # [0.99, 1.01], or if normalising moves any option by more than 0.05.
-        # Three such rejections out of five samples forfeit the question. That
-        # is a prompt problem, not a post-processing one, and is logged as
-        # follow-up work rather than guessed at here.
+        # The real multiple-choice risk is the opposite one, and it IS now
+        # handled — in the parsing instruction, not here. That same validator
+        # RAISES if the parsed probabilities sum outside [0.99, 1.01], or if
+        # clamping moves any option by more than 0.05, and three rejections out
+        # of five samples forfeit the question. It is a prompt problem: the
+        # parser is now told never to emit a literal zero and to sum to exactly
+        # 1.00, which makes the clamp a no-op. Fixed 2 Sept 2026; measured, the
+        # rejection needs roughly six or more literal zeros AND a concentrated
+        # forecast, not merely a wide option list as first claimed.
 
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}."
@@ -1488,43 +1604,42 @@ if __name__ == "__main__":
     # summary printers below.
     client = MetaculusClient()
     seasonal_id = None
-    seasonal_missing = False
+    problems: list[str] = []
     if run_mode == "tournament":
-        seasonal_id = resolve_seasonal_tournament()
-        # Fetch the questions ourselves rather than letting forecast_on_tournament
-        # do it internally, because it discards the COUNT and the count is the
-        # only thing that distinguishes a working tournament from a dead one.
-        seasonal_questions = client.get_all_open_questions_from_tournament(
-            seasonal_id
+        # MINIBENCH FIRST, and the seasonal ID resolved after it. The previous
+        # order resolved the seasonal ID up front and raised on an unset
+        # AIB_TOURNAMENT_ID — which forfeited MiniBench on every run of the
+        # rollover window, a scored series keyed by a slug that survives the
+        # rollover and was working perfectly. Audit, 2 Sept 2026.
+        #
+        # MiniBench gets the same fetch-and-verify as the seasonal half. It had
+        # no guard at all before: forecast_on_tournament discards the count, so
+        # if the "minibench" slug ever changes it would forecast nothing,
+        # silently, green, for as long as nobody looked.
+        minibench_questions, minibench_problem = fetch_and_verify_tournament(
+            client, client.CURRENT_MINIBENCH_ID, "MiniBench"
         )
-        logger.info(
-            "Seasonal tournament %r: %d open questions",
-            seasonal_id,
-            len(seasonal_questions),
-        )
-        if not seasonal_questions:
-            # Zero OPEN questions is normal — tournament questions accept
-            # forecasts for about 90 minutes and this runs every 10, so most
-            # runs legitimately find nothing. Zero questions AT ALL is not
-            # normal: it means the ID is wrong or the tournament has been
-            # retired, which is the four-month silent death. Distinguish the
-            # two with a second query that does not filter on status, and only
-            # pay for it on the runs that would otherwise have said nothing.
-            existing = asyncio.run(
-                client.get_questions_matching_filter(
-                    ApiFilter(allowed_tournaments=[seasonal_id])
+        if minibench_problem:
+            logger.error(minibench_problem)
+            problems.append(minibench_problem)
+            minibench_reports = []
+        else:
+            minibench_reports = asyncio.run(
+                template_bot.forecast_questions(
+                    minibench_questions, return_exceptions=True
                 )
             )
-            if existing:
-                logger.info(
-                    "%r holds %d questions, none open right now. Normal between "
-                    "windows.",
-                    seasonal_id,
-                    len(existing),
-                )
-            else:
-                seasonal_missing = True
-                logger.error(SEASON_MISSING_MESSAGE.format(tournament=seasonal_id))
+
+        seasonal_id, seasonal_problem = resolve_seasonal_tournament()
+        if seasonal_problem is None:
+            seasonal_questions, seasonal_problem = fetch_and_verify_tournament(
+                client, seasonal_id, "Seasonal"
+            )
+        else:
+            seasonal_questions = []
+        if seasonal_problem:
+            logger.error(seasonal_problem)
+            problems.append(seasonal_problem)
             seasonal_tournament_reports = []
         else:
             seasonal_tournament_reports = asyncio.run(
@@ -1532,13 +1647,7 @@ if __name__ == "__main__":
                     seasonal_questions, return_exceptions=True
                 )
             )
-        # MiniBench is keyed by a slug, so it survives the season rollover and
-        # is forecast even when the seasonal half has been skipped.
-        minibench_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_MINIBENCH_ID, return_exceptions=True
-            )
-        )
+
         forecast_reports = seasonal_tournament_reports + minibench_reports
     elif run_mode == "metaculus_cup":
         # The Metaculus Cup may be uninitialized near the start of a season
@@ -1601,19 +1710,35 @@ if __name__ == "__main__":
             len(successes),
         )
 
-    if seasonal_missing:
-        raise SystemExit(SEASON_MISSING_MESSAGE.format(tournament=seasonal_id))
-    if EMPTY_RESEARCH_COUNT:
-        # Logging this was not enough. Over four months nobody reads an INFO log
-        # on a green run, and a bot forecasting from model weights against a
-        # training cutoff is worth 3.6x Brier by Metaculus's own evidence. The
-        # forecasts have already been published — that is deliberate, a partial
-        # forecast beats none — but the run goes red so it cannot pass unseen.
-        raise SystemExit(
-            f"REFUSING TO PASS: {EMPTY_RESEARCH_COUNT} question(s) were forecast "
-            "with little or no research. Check the researcher model and the "
-            "OpenRouter balance."
-        )
+    # Empty research fails the run on a RATE, not on a single instance.
+    #
+    # Logging alone was not enough: over four months nobody reads an INFO line
+    # on a green run, and forecasting from model weights against a training
+    # cutoff is worth 3.6x Brier by Metaculus's own evidence. But failing on ONE
+    # short research string was worse — Sonar answering "I could not find
+    # relevant information" on a niche question is forty characters, and at 144
+    # runs a day that manufactures exactly the red-fatigue this file spends a
+    # paragraph warning about. A minority of thin research is life; a majority
+    # means the researcher is broken. Audit, 2 Sept 2026.
+    attempted = len(forecast_reports)
+    if EMPTY_RESEARCH_COUNT and attempted:
+        rate = EMPTY_RESEARCH_COUNT / attempted
+        if EMPTY_RESEARCH_COUNT >= EMPTY_RESEARCH_MIN_TO_FAIL and rate > EMPTY_RESEARCH_FAIL_RATE:
+            problems.append(
+                f"{EMPTY_RESEARCH_COUNT} of {attempted} questions were forecast "
+                "with little or no research. Check the researcher model and the "
+                "OpenRouter balance."
+            )
+        else:
+            logger.warning(
+                "%d of %d questions had thin research. Below the failure "
+                "threshold, so not failing the run.",
+                EMPTY_RESEARCH_COUNT,
+                attempted,
+            )
+
+    if problems:
+        raise SystemExit("REFUSING TO PASS: " + " | ".join(problems))
     if forecast_reports and not successes:
         raise SystemExit(
             f"REFUSING TO PASS: all {len(failures)} questions failed and nothing "

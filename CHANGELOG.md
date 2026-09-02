@@ -12,6 +12,64 @@ different bot.
 
 ---
 
+## 2026-09-02 (fourth audit round) — the guard that let a typo through
+
+An independent verification pass on the morning's fixes. It found that the
+season guard, twice rewritten, still had the hole it was written to close, and
+that requiring `AIB_TOURNAMENT_ID` had quietly created a new one.
+
+**The guard could not tell a typo from a correct ID.** The existence probe asks
+"does this tournament have any questions", with no status filter — so any ID
+resolving to any real Metaculus project with any posts came back healthy.
+Project IDs are dense (32916, 33021, 33022), so a transposed digit usually
+lands on *another real project*: green tick, zero seasonal forecasts, four
+months. Or worse, forecasts published into a tournament we are not entered in.
+
+- **The tournament must now verify as a BOT tournament.** Every question the API
+  returns carries the slugs of the tournaments it belongs to
+  (`MetaculusQuestion.tournament_slugs`), so this costs no extra request. A slug
+  must contain one of `aib`, `futureeval` or `minibench` — fragments rather than
+  names, because Metaculus has renamed the series over time (aibq3, fall-aib-2025,
+  summer-futureeval-2026). Fails SAFE on absent metadata: refusing when no slug
+  is present would turn an API change into an outage of our own making.
+
+**A regression from the morning: MiniBench was being forfeited.** Requiring
+`AIB_TOURNAMENT_ID` meant `resolve_seasonal_tournament()` raised *before* the
+MiniBench dispatch, so every run of the rollover window skipped a scored series
+that was working perfectly — and `main.py` still carried a comment claiming the
+opposite. Now: MiniBench is dispatched **first**, the resolver returns a problem
+rather than raising, and problems are collected and raised together at the end.
+
+**MiniBench had no count guard at all.** It went through
+`forecast_on_tournament`, which discards the question count — the exact thing
+this file calls "the most expensive failure available to us". Both halves now
+use the same fetch-and-verify path.
+
+**Empty research now fails on a RATE, not one instance.** The morning's version
+reddened the whole run for a single short research string. Sonar answering "I
+could not find relevant information" is forty characters; at 144 runs a day
+that manufactures precisely the red-fatigue this file spends a paragraph
+warning about, and red is the only alarm the project has. Now: three or more
+*and* a majority.
+
+**The rate limit had no margin, and the free tier was unsafe.** 10 × 2 = 20
+against a limit of 20 is a boundary, not headroom — and retries are correlated
+with being at the limit, since a 429 is what triggers one. Worse, the free tier
+keeps six retries, so 10 × 6 = 60. The unit test caught it only because it had
+been extended that morning to check *both* buckets instead of just the parser.
+`PER_MODEL_RPM` is now tier-aware: 3 on free (18 worst case), 8 elsewhere (16).
+Every tier now satisfies the invariant, where before it was accidentally true
+on one.
+
+**Two overstated claims corrected in place.** The multiple-choice rejection
+needs roughly six or more literal zeros *and* a concentrated forecast, not
+"seven options every time"; and a comment still described that risk as
+unhandled thirty lines below the instruction that handles it.
+
+97 unit tests with the cached upstream, 95 without. The real build check earned
+itself twice today: it caught two orphaned edits, and then caught me corrupting
+the patch file while mirroring these changes.
+
 ## 2026-09-02 (third attempt) — stop guessing at the build, actually run it
 
 The second commit failed the same step for the same reason: the date path's

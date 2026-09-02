@@ -406,8 +406,8 @@ def run():
           bool(_re.search(r"log_report_summary\(forecast_reports, raise_errors=False\)", src)), True)
     check("we still fail the run when nothing was submitted",
           bool(_re.search(r"REFUSING TO PASS", src)), True)
-    check("the season message is still raised",
-          bool(_re.search(r"raise SystemExit\(SEASON_MISSING_MESSAGE\.format", src)), True)
+    check("problems are collected and raised together",
+          bool(_re.search(r'raise SystemExit\("REFUSING TO PASS: " \+ " \| "\.join\(problems\)\)', src)), True)
 
     print("\n  -- season guard: a COUNT check, not a date and a denylist --")
     # The old guard (SEASON_GUARD_DATE + STALE_SEASON_IDS + season_is_stale) was
@@ -420,15 +420,15 @@ def run():
         check(f"{gone} is gone", gone in src, False)
 
     check("the seasonal question count is logged every run",
-          bool(_re.search(r'"Seasonal tournament %r: %d open questions"', src)), True)
+          bool(_re.search(r'"%s tournament %r: %d open questions"', src)), True)
     # Zero OPEN questions is normal between windows; zero questions AT ALL is a
     # dead ID. The probe distinguishes them and only runs when we would
     # otherwise have exited silently.
     check("an existence probe runs when nothing is open",
-          bool(_re.search(r"ApiFilter\(allowed_tournaments=\[seasonal_id\]\)", src)), True)
+          bool(_re.search(r"ApiFilter\(allowed_tournaments=\[tournament_id\]\)", src)), True)
     check("ApiFilter is imported", bool(_re.search(r"^    ApiFilter,$", src, _re.M)), True)
-    check("a missing tournament fails the run",
-          bool(_re.search(r"raise SystemExit\(SEASON_MISSING_MESSAGE\.format", src)), True)
+    check("a missing tournament is reported as a problem",
+          bool(_re.search(r"SEASON_MISSING_MESSAGE\.format\(", src)), True)
     check("a quiet window does NOT fail the run",
           bool(_re.search(r"Normal between", src)), True)
 
@@ -442,28 +442,81 @@ def run():
         # downstream cannot catch that: a retired tournament still HAS
         # questions, they are just all closed. Requiring the variable is the
         # only thing that closes both failures without dates or ID lists.
-        check("an unset AIB_TOURNAMENT_ID refuses to run", raises(seasonal), True)
+        # Returns (id, problem) rather than raising, so the caller can still
+        # forecast MiniBench before failing the run. Raising here forfeited a
+        # working scored series for the whole rollover window.
+        tid, problem = seasonal()
+        check("an unset AIB_TOURNAMENT_ID yields no id", tid, None)
+        check("...and reports a problem instead of raising", bool(problem), True)
         check("the old SDK fallback is gone from main.py",
               "client.CURRENT_AI_COMPETITION_ID" in src, False)
 
         _os.environ["AIB_TOURNAMENT_ID"] = "33099"
-        check("a numeric override is used, as an int", seasonal(), 33099)
+        check("a numeric override is used, as an int", seasonal(), (33099, None))
         _os.environ["AIB_TOURNAMENT_ID"] = "  33099  "
-        check("whitespace around the override is stripped", seasonal(), 33099)
+        check("whitespace around the override is stripped", seasonal(), (33099, None))
         _os.environ["AIB_TOURNAMENT_ID"] = "fall-futureeval-2026"
-        check("a slug override is used verbatim", seasonal(), "fall-futureeval-2026")
+        check("a slug override is used verbatim", seasonal(), ("fall-futureeval-2026", None))
         _os.environ["AIB_TOURNAMENT_ID"] = "   "
-        check("a blank override refuses, it does not fall back", raises(seasonal), True)
+        check("a blank override reports a problem, it does not fall back",
+              bool(seasonal()[1]), True)
     finally:
         _os.environ.pop("AIB_TOURNAMENT_ID", None)
         if saved is not None:
             _os.environ["AIB_TOURNAMENT_ID"] = saved
 
+    print("\n  -- the tournament must actually BE a bot tournament --")
+    # The count check alone cannot tell a typo from a correct ID: Metaculus
+    # project IDs are dense, so a transposed digit usually lands on another
+    # REAL project, which has questions and passes. Verified from the slugs the
+    # questions already carry, so it costs no extra request.
+    slug_problem, mods4 = load("tournament_slug_problem",
+                               consts=("BOT_TOURNAMENT_SLUG_MARKERS",))
+
+    class Q:
+        def __init__(self, slugs):
+            self.tournament_slugs = slugs
+
+    check("a real bot tournament passes",
+          slug_problem(33099, [Q(["fall-futureeval-2026"])], "Seasonal"), None)
+    check("MiniBench passes", slug_problem("minibench", [Q(["minibench"])], "MiniBench"), None)
+    check("the older aib naming still passes",
+          slug_problem(32813, [Q(["fall-aib-2025"])], "Seasonal"), None)
+    check("a typo landing on a real but unrelated project is REFUSED",
+          slug_problem(33021, [Q(["us-midterms-2026"])], "Seasonal") is not None, True)
+    check("...and the message names the tournament",
+          "33021" in (slug_problem(33021, [Q(["us-midterms-2026"])], "Seasonal") or ""), True)
+    check("one matching slug among several is enough",
+          slug_problem(1, [Q(["some-series"]), Q(["summer-futureeval-2026"])], "Seasonal"), None)
+    # Fails SAFE: refusing on absent metadata would turn an API change into an
+    # outage of our own making.
+    check("missing slug metadata does NOT refuse the run",
+          slug_problem(1, [Q([]), Q(None)], "Seasonal"), None)
+    check("no questions at all does not refuse here either",
+          slug_problem(1, [], "Seasonal"), None)
+
+    print("\n  -- MiniBench is guarded and runs first --")
+    check("MiniBench goes through fetch_and_verify_tournament",
+          bool(_re.search(r'fetch_and_verify_tournament\(\s*client, client\.CURRENT_MINIBENCH_ID, "MiniBench"', src)), True)
+    check("no un-guarded forecast_on_tournament remains in the tournament branch",
+          "forecast_on_tournament(\n                client.CURRENT_MINIBENCH_ID" in src, False)
+    # An unset AIB_TOURNAMENT_ID must not forfeit MiniBench.
+    mb = src.index('client.CURRENT_MINIBENCH_ID, "MiniBench"')
+    sid = src.index("seasonal_id, seasonal_problem = resolve_seasonal_tournament()")
+    check("MiniBench is dispatched BEFORE the seasonal id is resolved", mb < sid, True)
+
+    print("\n  -- empty research fails on a rate, not one instance --")
+    thresholds = load(consts=("EMPTY_RESEARCH_MIN_TO_FAIL", "EMPTY_RESEARCH_FAIL_RATE"))[-1]
+    check("a minimum count is required before failing",
+          thresholds.EMPTY_RESEARCH_MIN_TO_FAIL >= 2, True)
+    check("and a majority rate", 0 < thresholds.EMPTY_RESEARCH_FAIL_RATE <= 0.5, True)
+    check("one thin research string cannot red the run",
+          bool(_re.search(r"EMPTY_RESEARCH_COUNT >= EMPTY_RESEARCH_MIN_TO_FAIL and rate > EMPTY_RESEARCH_FAIL_RATE", src)), True)
     print("\n  -- research and forfeit guards --")
     check("empty research is counted, not just logged",
           bool(_re.search(r"EMPTY_RESEARCH_COUNT \+= 1", src)), True)
     check("and the count can turn the run red",
-          bool(_re.search(r"if EMPTY_RESEARCH_COUNT:", src)), True)
+          bool(_re.search(r"if EMPTY_RESEARCH_COUNT and attempted:", src)), True)
     # NumericReport.aggregate_predictions expands every sample's CDF in a list
     # comprehension, so a raise there kills the QUESTION, not the sample. Forcing
     # expansion inside the per-sample coroutine restores the 3-of-5 tolerance.
