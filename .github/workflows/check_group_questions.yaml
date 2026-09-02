@@ -1,0 +1,74 @@
+name: Check group questions
+
+# WHY THIS EXISTS
+#
+# One open question, settled by pressing a button: does the SDK report GROUP
+# subquestions as already forecast?
+#
+# skip_previously_forecasted_questions is the only thing stopping the 10-minute
+# cron re-forecasting the same question all season. It reads
+# question.already_forecasted, which the SDK fills from the question's
+# my_forecasts field. For an unpacked group subquestion that json is copied
+# straight out of the group payload, so the field is only there if Metaculus
+# puts it on each subquestion. The SDK patches exactly this for CONDITIONAL
+# questions and does nothing for groups, which reads like the case was never
+# considered.
+#
+# If it fails open, the bot would re-forecast group subquestions 144 times a
+# day — wasted money, and a breach of Metaculus's one-forecast-per-question
+# rule for bot-only tournaments. So main.py currently SKIPS group questions
+# (SKIP_GROUP_QUESTIONS = True) until this check says otherwise.
+#
+# This run is READ-ONLY. It fetches questions and prints what it sees. It
+# posts nothing, forecasts nothing, and costs nothing — no LLM calls at all.
+#
+# HOW TO READ IT: the verdict is printed on the run's summary page, so you do
+# not need to open the logs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tournament:
+        description: "Tournament slug or ID to inspect"
+        required: false
+        default: "bot-testing-area"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      - name: Inspect group questions
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+        run: |
+          # Deliberately does not fail the run on a non-zero exit. This is a
+          # diagnostic, and "inconclusive" is a legitimate answer — a red tick
+          # would read as a fault and erode the one alarm channel we have.
+          set +e
+          poetry run python check_group_questions.py "${{ inputs.tournament }}" 2>&1 | tee result.txt
+          echo "## Group-question check" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat result.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit 0
