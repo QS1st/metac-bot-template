@@ -1205,5 +1205,19 @@ replace(
     "import ApiFilter for the tournament-existence probe",
 )
 
+# ---------------------------------------------------------------------------
+# 16. MULTIPLE-CHOICE PARSING  (audit 2 Sept 2026: the upstream instruction to
+#     emit 0% options manufactures the very rejection that forfeits questions.
+#     PredictedOptionList clamps to [0.01, 0.99] and then RAISES if clamping
+#     moved any option by more than 0.05 — which happens at 7+ options. With
+#     STRUCTURE_OUTPUT_ALLOWED_TRIES = 1 there is no retry, and three lost
+#     samples forfeit the question.)
+# ---------------------------------------------------------------------------
+replace(
+    '            Additionally, you may sometimes need to parse a 0% probability. Please do not skip options with 0% but rather make it an entry in your final list with 0% probability.',
+    '            Do not skip options. Every option above must appear in your final list.\n            NEVER emit exactly 0 for an option. Use 0.01 as the minimum for any\n            option you consider negligible, and make the probabilities sum to\n            exactly 1.00.\n\n            (Both rules exist because the library validates this list before we\n            ever see it: it rejects the whole sample if the probabilities sum\n            outside 0.99-1.01, and it clamps every option into 0.01-0.99 and\n            then rejects the sample if that clamping moved any option by more\n            than 0.05. A confident forecast across eight or more options with\n            literal zeros trips the second rule every time. A rejected sample is\n            not a smaller forecast, it is a lost one, and three lost samples\n            forfeit the question entirely.)',
+    "multiple-choice parsing: never emit a literal zero",
+)
+
 DST.write_text(text)
 print(f"\n{edits} edits applied cleanly -> {DST}")

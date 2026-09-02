@@ -616,7 +616,6 @@ def resolve_seasonal_tournament() -> int | str:
     return resolved
 
 
-
 class SummerTemplateBot2026(ForecastBot):
     """
     This is the template bot for Summer 2026 Metaculus AI Tournament.

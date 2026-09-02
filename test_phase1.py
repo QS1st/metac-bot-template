@@ -343,6 +343,34 @@ def run():
     check("every patch replacement appears verbatim in main.py", mismatched, [])
     check("the patch actually has replacements to check", replacements > 10, True)
 
+    # ...and the OTHER direction, which is what actually bit on 2 Sept 2026.
+    # The check above only proves the patch's edits are IN main.py. It says
+    # nothing about main.py containing edits the patch does not produce — and
+    # that is exactly what happened: the multiple-choice parsing instruction was
+    # rewritten in main.py with no corresponding patch entry, so CI rebuilt a
+    # main.py without it and the diff failed after the commit.
+    #
+    # Reverse-applying every replacement should strip our work back out. Any of
+    # our markers still standing in the residue is an edit with no patch entry.
+    # A heuristic, not a proof — CI's rebuild-and-diff remains the authority —
+    # but it runs in a second and catches this class before a commit.
+    residue = src
+    for node in ast.walk(ast.parse(patch_src)):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") in ("replace", "replace_all"):
+            try:
+                old_text = ast.literal_eval(node.args[0])
+                new_text = ast.literal_eval(node.args[1])
+            except Exception:
+                continue
+            residue = residue.replace(new_text, old_text)
+
+    OURS = ("Audit, 1 Sept", "audit on 1 Sept", "audit 2 Sept", "REFUSING TO",
+            "PER_MODEL_RPM", "EMPTY_RESEARCH_COUNT", "AMBIGUITY: LOW",
+            "NEVER emit exactly 0", "seasonal_missing", "_invoke_default_llm",
+            "_structure_output_paced", "AIB_TOURNAMENT_ID")
+    orphans = sorted({m for m in OURS if m in residue})
+    check("no edit in main.py lacks a patch entry", orphans, [])
+
     print("\n  -- the exit path is reachable --")
     # log_report_summary defaults to raise_errors=True and raises on ANY failed
     # question, which made everything after it — the banner and the season

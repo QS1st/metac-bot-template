@@ -12,6 +12,35 @@ different bot.
 
 ---
 
+## 2026-09-02 (later) — the build check caught an edit with no patch entry
+
+The commit went red on "The committed main.py must match what the patch
+produces". Two divergences, both mine:
+
+- **The multiple-choice parsing instruction had no patch entry.** It was
+  rewritten directly in `main.py` and never mirrored, so CI rebuilt a `main.py`
+  without it. That is not a cosmetic mismatch: the rebuilt bot would still have
+  been telling the parser to emit 0% options — the exact instruction that
+  manufactures the forfeit the rewrite was meant to stop. The disclosure
+  document would also have been describing a build nobody was running.
+- **One blank line too many**, left behind when `season_is_stale` was deleted.
+
+**The real fault was the local check, and that is now fixed.** It verified that
+every patch replacement appears in `main.py` — one direction only. It could
+never see an edit that exists in `main.py` with nothing in the patch to produce
+it, which is precisely what happened. It now also reverse-applies every
+replacement and asserts none of our markers survive in the residue: anything
+still standing is an edit with no patch entry. Verified by deleting the
+multiple-choice edit and watching it fail with `['NEVER emit exactly 0']`, then
+restoring it.
+
+A heuristic rather than a proof — CI's rebuild-and-diff remains the authority,
+since it clones real upstream — but it runs in a second and catches this class
+before a commit rather than after one. Three of the last few cycles were spent
+discovering things a local check could have found.
+
+17 patch replacements, 80 unit tests.
+
 ## 2026-09-02 (morning) — AIB_TOURNAMENT_ID is now required, closing a hole I had just made
 
 The count-based guard written last night had a gap, found while researching
