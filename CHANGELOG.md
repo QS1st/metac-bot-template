@@ -12,6 +12,66 @@ different bot.
 
 ---
 
+## 2026-09-05 — a declared "no season" state, and its expiry date
+
+**Why.** The Fall 2026 tournament exists (`33121`, `fall-futureeval-2026`) but
+opens on 28 September and currently holds zero questions. The MiniBench round
+starts 7 September. Between those dates the seasonal half of tournament mode has
+nothing to point at, and both available states turned every run red:
+
+- `AIB_TOURNAMENT_ID` unset → `REFUSING TO PASS`.
+- `AIB_TOURNAMENT_ID=33121` → `SEASON_MISSING`, because a tournament holding no
+  questions is indistinguishable from a retired one.
+
+At a run every ten minutes that is roughly 144 red runs and failure emails a
+day, into the single alarm channel this project has. Red that always fires is
+the same as no red at all.
+
+**Change.** `AIB_TOURNAMENT_ID` now accepts `none` / `off` / `skip` / `-`
+(case-insensitive). The seasonal half is then skipped with a loud log line and
+**no** problem raised, MiniBench is forecast as normal, and the run stays green.
+The gap is declared rather than inferred: no dates, no silent fallback, and
+somebody has to type it. The caller was also corrected to check the id and not
+merely the absence of a problem, and the summary banner now shows the MiniBench
+URL rather than `.../tournament/None/`.
+
+**The flaw in that change, and the fix.** An independent audit of the above
+found it reproduced the exact failure it was written to prevent. Every detector
+on the seasonal side — the question-count check, the slug check,
+`SEASON_MISSING` — sits *behind* the sentinel, so declaring the gap switches all
+of them off. Left set to `none` through the season opening, the bot would have
+forecast MiniBench only, green, every ten minutes for four months, with nothing
+in the code able to notice. That is the ~150-peer-point failure mode this
+project treats as its worst case.
+
+So the sentinel expires: `NO_SEASON_EXPIRY = 2026-09-28`, after which it is
+refused and the run goes red. A date guard was retired from this file once
+before, on the grounds that it expired into *silence* and left the next rollover
+unprotected. This one expires into *noise*, which is the safe direction — firing
+late wastes a little attention, failing to fire costs a season. The red is
+actionable and self-clearing, it stops the moment the variable is set, and it is
+raised at the end of the run so MiniBench is still forecast first.
+
+**Also in this change**
+- `SEASON_MISSING_MESSAGE` now takes a per-half remedy. It previously told the
+  operator to set `AIB_TOURNAMENT_ID` even when it was MiniBench that failed —
+  a variable with nothing to do with the fault.
+- Removed a doubled `REFUSING TO PASS:` prefix in the unset message.
+- Corrected a claim in two places that the trial tier is "about 8 percent off
+  the frontier". Read per question rather than by tournament total, the Summer
+  2026 leaderboard puts `claude-fable-5-high` at 6.94 average peer points
+  against `gemini-3.5-flash` on 5.03 — roughly a quarter below, not 8 percent.
+  The original figure came from ranking bots by tournament total, which is
+  average score times questions answered; since the reference bots joined on
+  different dates, those totals largely measure coverage rather than skill.
+
+Tests added for every value of the sentinel, its case- and
+whitespace-insensitivity, a collision check against real tournament ids and
+slugs, the distinction between the sentinel and an unset variable, and the
+expiry either side of 28 September against a frozen clock.
+
+---
+
 ## 2026-09-02 (settled) — group questions are back on, because it was tested
 
 `check_group_questions.py`, run against the bot-testing-area as a manual

@@ -292,8 +292,14 @@ SEASON_MODELS = {
 
 # TRIAL TIER. Strong-but-cheap, for scored runs we are paying for ourselves.
 #
-# Metaculus's own model leaderboard (read 31 Aug 2026) puts Gemini 3.6 Flash at
-# 12.70 against Claude Fable 5 High at 13.77 — around 8 percent off the pace.
+# CORRECTED 5 Sept 2026. The earlier note here read "around 8 percent off the
+# pace", taken from a model leaderboard. The Summer 2026 final leaderboard,
+# read per question rather than by tournament total, puts the gap far wider:
+# claude-fable-5-high averaged 6.94 peer points a question against
+# gemini-3.5-flash on 5.03 — about a quarter below, not 8 percent. Ranking
+# those bots by tournament TOTAL is what produced the wrong figure: total is
+# average score times questions answered, and the reference bots joined on
+# different dates, so totals mostly measure coverage.
 # OpenRouter prices them, verified live against /api/v1/models the same day, at
 # $0.75/$3.75 and $10/$50 per million tokens: Fable is 13.3x dearer for that 8
 # percent.
@@ -440,7 +446,8 @@ def assert_tier_matches_mode(run_mode: str) -> None:
     if MODEL_TIER == "trial":
         logger.warning(
             "Forecasting a SCORED tournament on the TRIAL tier: cheaper models, "
-            "about 8 percent off the frontier on Metaculus's own leaderboard. "
+            "roughly a quarter below the best model on the Metaculus reference "
+            "bots per question (5.03 v 6.94 average peer score, 2 Sept 2026). "
             "Deliberate while we are paying for inference ourselves."
         )
 
@@ -576,7 +583,7 @@ def build_llm_config():
 # Rolling the season over needs no code change:
 #   GitHub -> Settings -> Secrets and variables -> Actions -> Variables -> New
 #   Name:  AIB_TOURNAMENT_ID
-#   Value: the Fall 2026 project ID (e.g. 33099) or its slug
+#   Value: the Fall 2026 project ID (33121) or its slug
 # Until that is set, MiniBench is forecast as normal, the seasonal half is
 # skipped, and the run fails so the workflow turns red. MiniBench runs FIRST in
 # the dispatch precisely so an unset variable cannot forfeit it.
@@ -592,13 +599,62 @@ def build_llm_config():
 #
 # Replaced by a question COUNT check at the point of use. It needs no dates, no
 # ID list and no maintenance, and it is correct at every future rollover.
+# Explicit "there is no seasonal tournament right now" sentinel.
+#
+# Between seasons the seasonal half has nothing to point at, and BOTH of the
+# other options turn every run red: leaving AIB_TOURNAMENT_ID unset raises
+# REFUSING TO PASS, and setting it to a season that has not opened yet trips
+# SEASON_MISSING, because a tournament holding no questions is
+# indistinguishable from a retired one. At a run every ten minutes that is
+# about 144 failure emails a day, drowning the single alarm channel this
+# project has.
+#
+# So the gap is DECLARED, not inferred. No dates and no silent fallback:
+# somebody has to type it, and every run then says loudly that the seasonal
+# half is deliberately off. Added 5 Sept 2026, three days before the MiniBench
+# round it would otherwise have blocked.
+NO_SEASON_VALUES = ("none", "off", "skip", "-")
+
+# THE SENTINEL EXPIRES, and that is the whole point of this line.
+#
+# Audit, 5 Sept 2026, found the flaw in the first version: every detector on
+# the seasonal side (the question COUNT check, the slug check, SEASON_MISSING)
+# sits behind the sentinel, so declaring the gap removes them all. Left set to
+# "none" through the season opening, the bot would forecast MiniBench only,
+# GREEN, every ten minutes for four months, and nothing in the code could
+# notice. That is the ~150-peer-point failure this whole block exists to
+# prevent, faithfully reproduced by the guard written to prevent it.
+#
+# A date was rejected once before, for good reason: the old guard expired into
+# SILENCE, so once it was spent the next rollover had no alarm at all. This
+# one expires into NOISE, which is the safe direction. Firing late costs a
+# little wasted attention; not firing costs a season. The red it produces is
+# actionable and self-clearing — it stops the moment the variable is set — and
+# it is raised at the END of the run, so MiniBench is still forecast first.
+NO_SEASON_EXPIRY = datetime(2026, 9, 28, tzinfo=timezone.utc)
+
+# The remedy differs by half, so it is not baked into the message. Telling an
+# operator to set AIB_TOURNAMENT_ID when it is MINIBENCH that broke sends
+# them to a variable with nothing to do with the fault. Audit, 5 Sept 2026.
+SEASON_MISSING_FIXES = {
+    "Seasonal": (
+        "Fix: set the repository variable AIB_TOURNAMENT_ID (Settings > "
+        "Secrets and variables > Actions > Variables) to the current "
+        "seasonal tournament ID or slug."
+    ),
+    "MiniBench": (
+        "Fix: MiniBench is keyed by the slug 'minibench', which Metaculus "
+        "says is always the currently active round. If it now holds "
+        "nothing, the slug has changed — check the MiniBench tournament "
+        "page and the Metaculus Discord before changing anything here."
+    ),
+}
+
 SEASON_MISSING_MESSAGE = (
     "{label} TOURNAMENT NOT FOUND: {tournament!r} contains no questions at "
     "all. That is a wrong or retired tournament ID, not a quiet hour — a live "
     "tournament always has questions even when none are currently open. That "
-    "half of this run forecast NOTHING. Fix: set the repository variable "
-    "AIB_TOURNAMENT_ID (Settings > Secrets and variables > Actions > "
-    "Variables) to the current seasonal tournament ID or slug."
+    "half of this run forecast NOTHING. {fix}"
 )
 
 
@@ -738,7 +794,11 @@ def fetch_and_verify_tournament(client, tournament_id, label: str):
         )
         if not sample:
             return [], SEASON_MISSING_MESSAGE.format(
-                tournament=tournament_id, label=label
+                tournament=tournament_id,
+                label=label,
+                fix=SEASON_MISSING_FIXES.get(
+                    label, SEASON_MISSING_FIXES["Seasonal"]
+                ),
             )
         logger.info(
             "%r holds %d questions, none open right now. Normal between windows.",
@@ -749,7 +809,14 @@ def fetch_and_verify_tournament(client, tournament_id, label: str):
 
 
 def resolve_seasonal_tournament():
-    """Return (tournament_id_or_None, problem_or_None). AIB_TOURNAMENT_ID is REQUIRED.
+    """Return (tournament_id_or_None, problem_or_None). Three outcomes, not two.
+
+    (id, None)     a real tournament to forecast.
+    (None, None)   the NO_SEASON_VALUES sentinel: no season right now, by
+                   explicit declaration. Expires at NO_SEASON_EXPIRY.
+    (None, problem) unset, blank, or an expired sentinel. The run goes red.
+
+    AIB_TOURNAMENT_ID is REQUIRED: there is no inferred default.
 
     Returns a problem rather than raising, so the caller can still forecast
     MiniBench before failing the run. The first version raised here, which meant
@@ -774,13 +841,32 @@ def resolve_seasonal_tournament():
     override = os.environ.get("AIB_TOURNAMENT_ID", "").strip()
     if not override:
         return None, (
-            "REFUSING TO PASS: AIB_TOURNAMENT_ID is not set. Tournament mode has "
+            "AIB_TOURNAMENT_ID is not set. Tournament mode has "
             "to be told which seasonal tournament to forecast — the SDK's "
             "built-in constant is pinned to Summer 2026 and would forecast a "
             "finished tournament without complaining. Set the repository "
             "variable (Settings > Secrets and variables > Actions > Variables) "
             "to the current seasonal tournament ID or slug."
         )
+    if override.lower() in NO_SEASON_VALUES:
+        now = datetime.now(timezone.utc)
+        if now >= NO_SEASON_EXPIRY:
+            return None, (
+                f"AIB_TOURNAMENT_ID is still {override!r} on "
+                f"{now:%Y-%m-%d}, past the declared no-season window that "
+                f"ended {NO_SEASON_EXPIRY:%Y-%m-%d}. The seasonal tournament "
+                "has opened and this bot is forecasting MiniBench ONLY. Set "
+                "AIB_TOURNAMENT_ID to the Fall 2026 tournament ID (33121, "
+                "fall-futureeval-2026), or move NO_SEASON_EXPIRY deliberately."
+            )
+        logger.warning(
+            "AIB_TOURNAMENT_ID=%r: NO SEASONAL TOURNAMENT this run, by "
+            "explicit configuration. MiniBench only. Set the real tournament "
+            "ID when the season opens. Fall 2026 is 33121 "
+            "(fall-futureeval-2026), opening 28 Sept 2026.",
+            override,
+        )
+        return None, None
     resolved = int(override) if override.isdigit() else override
     logger.info("Seasonal tournament %r (from AIB_TOURNAMENT_ID)", resolved)
     return resolved, None
@@ -1712,7 +1798,9 @@ if __name__ == "__main__":
             )
 
         seasonal_id, seasonal_problem = resolve_seasonal_tournament()
-        if seasonal_problem is None:
+        # seasonal_id is None with NO problem when the NO_SEASON_VALUES
+        # sentinel is set: there is nothing to fetch, and nothing wrong.
+        if seasonal_problem is None and seasonal_id is not None:
             seasonal_questions, seasonal_problem = fetch_and_verify_tournament(
                 client, seasonal_id, "Seasonal"
             )
@@ -1756,7 +1844,11 @@ if __name__ == "__main__":
     # the link cannot drift away from what the bot really did. Metaculus
     # redirects /tournament/<numeric id>/ to the slug (checked 31 Aug 2026).
     TOURNAMENT_URLS = {
-        "tournament": f"https://www.metaculus.com/tournament/{seasonal_id}/",
+        "tournament": (
+            f"https://www.metaculus.com/tournament/{seasonal_id}/"
+            if seasonal_id is not None
+            else "https://www.metaculus.com/tournament/minibench/"
+        ),
         "metaculus_cup": "https://www.metaculus.com/tournament/metaculus-cup-summer-2025/",
         "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
     }

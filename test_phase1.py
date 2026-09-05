@@ -445,7 +445,9 @@ def run():
     check("a quiet window does NOT fail the run",
           bool(_re.search(r"Normal between", src)), True)
 
-    seasonal, mods3 = load("resolve_seasonal_tournament", consts=("SEASON_MISSING_MESSAGE",))
+    seasonal, mods3 = load("resolve_seasonal_tournament",
+                           consts=("SEASON_MISSING_MESSAGE", "NO_SEASON_VALUES",
+                                   "NO_SEASON_EXPIRY"))
 
     saved = _os.environ.pop("AIB_TOURNAMENT_ID", None)
     try:
@@ -473,6 +475,89 @@ def run():
         _os.environ["AIB_TOURNAMENT_ID"] = "   "
         check("a blank override reports a problem, it does not fall back",
               bool(seasonal()[1]), True)
+
+        # THE NO-SEASON SENTINEL, added 5 Sept 2026.
+        #
+        # Between seasons there is no seasonal tournament to point at, and both
+        # of the other states turn every run red: unset raises REFUSING TO
+        # PASS, and a season that has not opened yet holds zero questions,
+        # which SEASON_MISSING cannot tell apart from a retired one. At 144
+        # runs a day that floods the only alarm channel this project has.
+        #
+        # The sentinel must return NO id and NO problem: the seasonal half is
+        # skipped, MiniBench still runs, and the workflow stays green.
+        for value in mods3.NO_SEASON_VALUES:
+            _os.environ["AIB_TOURNAMENT_ID"] = value
+            check(f"sentinel {value!r} skips the season without a problem",
+                  seasonal(), (None, None))
+        _os.environ["AIB_TOURNAMENT_ID"] = "NONE"
+        check("the sentinel is case-insensitive", seasonal(), (None, None))
+        _os.environ["AIB_TOURNAMENT_ID"] = "  Off  "
+        check("...and tolerates surrounding whitespace", seasonal(), (None, None))
+
+        # The sentinel must not be reachable by accident. If a real tournament
+        # id or slug ever collided with one of these, setting it would silently
+        # skip the season for a whole tournament.
+        for real in ("33121", "fall-futureeval-2026", "minibench", "33022"):
+            check(f"a real target {real!r} is not mistaken for the sentinel",
+                  real.lower() in mods3.NO_SEASON_VALUES, False)
+
+        # And it must stay DISTINCT from unset. Declaring the gap is a
+        # deliberate act; forgetting to set the variable is not, and the two
+        # must not produce the same outcome.
+        _os.environ.pop("AIB_TOURNAMENT_ID", None)
+        check("unset still reports a problem, unlike the sentinel",
+              bool(seasonal()[1]), True)
+
+        # THE SENTINEL MUST EXPIRE.
+        #
+        # Every detector on the seasonal side — the question count, the slug
+        # check, SEASON_MISSING — sits behind the sentinel, so declaring the
+        # gap switches them all off. Left declared through the season opening,
+        # the bot forecasts MiniBench only, GREEN, for four months, and nothing
+        # in the code can notice. Found by audit on 5 Sept 2026, in the guard
+        # written to prevent exactly that failure.
+        #
+        # The old date guard was retired because it expired into SILENCE. This
+        # one expires into NOISE, which is the safe direction: firing late
+        # wastes attention, failing to fire costs a season.
+        check("the expiry is the Fall 2026 opening",
+              (mods3.NO_SEASON_EXPIRY.year, mods3.NO_SEASON_EXPIRY.month,
+               mods3.NO_SEASON_EXPIRY.day), (2026, 9, 28))
+        check("the expiry is timezone-aware, so the comparison cannot raise",
+              mods3.NO_SEASON_EXPIRY.tzinfo is not None, True)
+
+        class _FrozenClock:
+            """Stands in for datetime, so the expiry is testable without waiting."""
+            def __init__(self, when):
+                self._when = when
+            def now(self, tz=None):
+                return self._when
+
+        real_clock = mods3.datetime
+        try:
+            for label, when, expect_problem in (
+                ("the day before the season opens", _datetime(2026, 9, 27, 23, 0, tzinfo=_timezone.utc), False),
+                ("the moment the season opens", _datetime(2026, 9, 28, 0, 0, tzinfo=_timezone.utc), True),
+                ("a month into the season", _datetime(2026, 10, 28, tzinfo=_timezone.utc), True),
+            ):
+                mods3.datetime = _FrozenClock(when)
+                _os.environ["AIB_TOURNAMENT_ID"] = "none"
+                tid, problem = seasonal()
+                check(f"sentinel on {label}: id is still None", tid, None)
+                check(f"sentinel on {label}: problem raised = {expect_problem}",
+                      bool(problem), expect_problem)
+            # The expired message must name the variable AND the real Fall id,
+            # because whoever reads it will be fixing it in a hurry.
+            mods3.datetime = _FrozenClock(_datetime(2026, 10, 1, tzinfo=_timezone.utc))
+            _os.environ["AIB_TOURNAMENT_ID"] = "none"
+            expired = seasonal()[1]
+            check("the expired message names AIB_TOURNAMENT_ID",
+                  "AIB_TOURNAMENT_ID" in expired, True)
+            check("...and the Fall 2026 id, so the fix needs no lookup",
+                  "33121" in expired, True)
+        finally:
+            mods3.datetime = real_clock
     finally:
         _os.environ.pop("AIB_TOURNAMENT_ID", None)
         if saved is not None:
@@ -565,6 +650,15 @@ def run():
     mb = src.index('client.CURRENT_MINIBENCH_ID, "MiniBench"')
     sid = src.index("seasonal_id, seasonal_problem = resolve_seasonal_tournament()")
     check("MiniBench is dispatched BEFORE the seasonal id is resolved", mb < sid, True)
+    # With the sentinel set, resolve returns (None, None). Fetching tournament
+    # None would raise inside the SDK, so the caller must check the id too and
+    # not merely the absence of a problem.
+    check("the caller does not fetch a None tournament",
+          bool(_re.search(r"if seasonal_problem is None and seasonal_id is not None:", src)), True)
+    # The summary banner is what a human actually reads. With no season it must
+    # not print .../tournament/None/.
+    check("the banner falls back to the MiniBench url when there is no season",
+          bool(_re.search(r'else "https://www\.metaculus\.com/tournament/minibench/"', src)), True)
 
     print("\n  -- empty research fails on a rate, not one instance --")
     thresholds = load(consts=("EMPTY_RESEARCH_MIN_TO_FAIL", "EMPTY_RESEARCH_FAIL_RATE"))[-1]
