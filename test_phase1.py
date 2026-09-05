@@ -445,6 +445,73 @@ def run():
     check("a quiet window does NOT fail the run",
           bool(_re.search(r"Normal between", src)), True)
 
+    # EMPTY MEANS DIFFERENT THINGS FOR THE TWO HALVES.
+    #
+    # A season runs continuously for four months, so an empty seasonal
+    # tournament is a wrong or retired ID and must red the run. MiniBench is a
+    # chain of two-week rounds behind a slug that repoints between them, so
+    # empty is a NORMAL state there for hours or days at a time.
+    #
+    # Learned live on 5 Sept 2026: the first run of the tournament workflow
+    # failed with "MiniBench TOURNAMENT NOT FOUND" two days before a round we
+    # were entering. Left fatal it would have reddened every run in every
+    # inter-round gap, permanently — and red that always fires is the same as
+    # no red at all.
+    # BEHAVIOURAL, not textual. The first version of these checks was five
+    # regexes, and an audit on 5 Sept 2026 showed all five stayed green through
+    # the exact refactor they existed to catch — including moving the opt-out
+    # from the MiniBench call to the SEASONAL one. That is the same failure this
+    # project has already written up twice: a test that agrees with itself.
+    fetchv, modsF = load("fetch_and_verify_tournament",
+                         consts=("SEASON_MISSING_MESSAGE", "SEASON_MISSING_FIXES",
+                                 "SKIP_GROUP_QUESTIONS", "BOT_TOURNAMENT_SLUG_MARKERS"))
+    import asyncio as _aio
+    modsF.asyncio = _aio
+    modsF.ApiFilter = lambda **kw: kw
+    modsF.drop_group_questions = lambda q, label: q
+    modsF.tournament_slug_problem = lambda t, q, label: None
+
+    class _Q:
+        def __init__(self, slugs): self.tournament_slugs = slugs
+
+    class _Client:
+        """open_qs is what the tournament returns now; all_qs is the probe."""
+        def __init__(self, open_qs, all_qs): self._o, self._a = open_qs, all_qs
+        def get_all_open_questions_from_tournament(self, t): return list(self._o)
+        async def get_questions_matching_filter(self, f): return list(self._a)
+
+    q, p = fetchv(_Client([], []), "minibench", "MiniBench", empty_is_fatal=False)
+    check("an empty MiniBench returns NO problem", (q, p), ([], None))
+    q, p = fetchv(_Client([], []), 33121, "Seasonal")
+    check("an empty SEASONAL tournament still returns a problem", (q, bool(p)), ([], True))
+    check("...and the default is fatal, so a new call site is strict",
+          bool(fetchv(_Client([], []), 33121, "Anything")[1]), True)
+
+    # The quiet window: nothing OPEN, but questions exist behind it. This is
+    # most runs in a live tournament, and it must never fail.
+    check("a quiet window with questions behind it does not fail",
+          fetchv(_Client([], [_Q(["minibench"])]), "minibench", "MiniBench")[1], None)
+
+    # THE LEAK THE AUDIT FOUND. Before this was made keyword-only,
+    # fetch_and_verify_tournament(client, id, "Seasonal", False) silently
+    # disarmed the season, and every regex test still passed.
+    try:
+        fetchv(_Client([], []), 33121, "Seasonal", False)
+        leaked = True
+    except TypeError:
+        leaked = False
+    check("the opt-out CANNOT be passed positionally", leaked, False)
+
+    # And bind the opt-out to the MiniBench call site specifically, rather than
+    # counting occurrences anywhere in the file.
+    _mb = _re.search(r'fetch_and_verify_tournament\((?:[^()]|\([^)]*\))*?"MiniBench".*?\n\s*\)', src, _re.S)
+    check("MiniBench is the call that carries the opt-out",
+          bool(_mb) and "empty_is_fatal=False" in _mb.group(0), True)
+    check("the seasonal call takes the strict default, with no opt-out",
+          bool(_re.search(r'fetch_and_verify_tournament\(\s*\n?\s*client, seasonal_id, "Seasonal"\s*\n?\s*\)', src)), True)
+    check("an empty non-fatal tournament raises a GitHub annotation, not just a log line",
+          bool(_re.search(r'::warning title=', src)), True)
+
     seasonal, mods3 = load("resolve_seasonal_tournament",
                            consts=("SEASON_MISSING_MESSAGE", "NO_SEASON_VALUES",
                                    "NO_SEASON_EXPIRY"))
@@ -521,9 +588,14 @@ def run():
         # The old date guard was retired because it expired into SILENCE. This
         # one expires into NOISE, which is the safe direction: firing late
         # wastes attention, failing to fire costs a season.
-        check("the expiry is the Fall 2026 opening",
+        # 30 Sept, not 28th. The two days of grace exist because Metaculus
+        # creates a tournament project before populating it — proved by
+        # "minibench" holding zero questions on 5 Sept for a 7 Sept round. On
+        # the 28th, an expiry of the 28th would have made BOTH settings red:
+        # "none" expired, and 33121 empty-and-fatal.
+        check("the expiry allows two days of grace past the Fall opening",
               (mods3.NO_SEASON_EXPIRY.year, mods3.NO_SEASON_EXPIRY.month,
-               mods3.NO_SEASON_EXPIRY.day), (2026, 9, 28))
+               mods3.NO_SEASON_EXPIRY.day), (2026, 9, 30))
         check("the expiry is timezone-aware, so the comparison cannot raise",
               mods3.NO_SEASON_EXPIRY.tzinfo is not None, True)
 
@@ -538,8 +610,10 @@ def run():
         try:
             for label, when, expect_problem in (
                 ("the day before the season opens", _datetime(2026, 9, 27, 23, 0, tzinfo=_timezone.utc), False),
-                ("the moment the season opens", _datetime(2026, 9, 28, 0, 0, tzinfo=_timezone.utc), True),
-                ("a month into the season", _datetime(2026, 10, 28, tzinfo=_timezone.utc), True),
+                ("the morning the season opens, still in grace", _datetime(2026, 9, 28, 9, 0, tzinfo=_timezone.utc), False),
+                ("the last hour of grace", _datetime(2026, 9, 29, 23, 0, tzinfo=_timezone.utc), False),
+                ("the moment grace runs out", _datetime(2026, 9, 30, 0, 0, tzinfo=_timezone.utc), True),
+                ("a month into the season", _datetime(2026, 10, 30, tzinfo=_timezone.utc), True),
             ):
                 mods3.datetime = _FrozenClock(when)
                 _os.environ["AIB_TOURNAMENT_ID"] = "none"
@@ -643,11 +717,11 @@ def run():
 
     print("\n  -- MiniBench is guarded and runs first --")
     check("MiniBench goes through fetch_and_verify_tournament",
-          bool(_re.search(r'fetch_and_verify_tournament\(\s*client, client\.CURRENT_MINIBENCH_ID, "MiniBench"', src)), True)
+          bool(_re.search(r'fetch_and_verify_tournament\(\s*client,\s*client\.CURRENT_MINIBENCH_ID,\s*"MiniBench"', src)), True)
     check("no un-guarded forecast_on_tournament remains in the tournament branch",
           "forecast_on_tournament(\n                client.CURRENT_MINIBENCH_ID" in src, False)
     # An unset AIB_TOURNAMENT_ID must not forfeit MiniBench.
-    mb = src.index('client.CURRENT_MINIBENCH_ID, "MiniBench"')
+    mb = _re.search(r'client\.CURRENT_MINIBENCH_ID,\s*\n?\s*"MiniBench"', src).start()
     sid = src.index("seasonal_id, seasonal_problem = resolve_seasonal_tournament()")
     check("MiniBench is dispatched BEFORE the seasonal id is resolved", mb < sid, True)
     # With the sentinel set, resolve returns (None, None). Fetching tournament

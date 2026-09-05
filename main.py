@@ -631,7 +631,16 @@ NO_SEASON_VALUES = ("none", "off", "skip", "-")
 # little wasted attention; not firing costs a season. The red it produces is
 # actionable and self-clearing — it stops the moment the variable is set — and
 # it is raised at the END of the run, so MiniBench is still forecast first.
-NO_SEASON_EXPIRY = datetime(2026, 9, 28, tzinfo=timezone.utc)
+# 30 September, not the 28th, and the two days are deliberate. Audit, 5 Sept
+# 2026: on the 28th BOTH settings would have been red if Metaculus creates the
+# Fall project before populating it — "none" because the sentinel had expired,
+# and 33121 because an empty seasonal tournament is fatal. We have direct
+# evidence they do exactly that: "minibench" held zero questions on 5 Sept for
+# a round starting on the 7th. A guaranteed red morning is not a safety
+# feature — it is 144 emails, and the obvious way to make them stop is to
+# disarm the seasonal guard, permanently. Two days of grace buys a
+# configuration that is green while we wait for the first Fall question.
+NO_SEASON_EXPIRY = datetime(2026, 9, 30, tzinfo=timezone.utc)
 
 # The remedy differs by half, so it is not baked into the message. Telling an
 # operator to set AIB_TOURNAMENT_ID when it is MINIBENCH that broke sends
@@ -760,8 +769,35 @@ def drop_group_questions(questions, label: str):
     return kept
 
 
-def fetch_and_verify_tournament(client, tournament_id, label: str):
+def fetch_and_verify_tournament(
+    client, tournament_id, label: str, *, empty_is_fatal: bool = True
+):
     """Return (open_questions, problem_message_or_None).
+
+    empty_is_fatal says what "this tournament holds no questions at all"
+    MEANS, and it is not the same thing for both halves.
+
+    For the SEASON it means broken. A season runs continuously for about four
+    months, so an empty seasonal tournament is a wrong or retired ID and the
+    run must go red.
+
+    For MINIBENCH it is normal. MiniBench is a chain of back-to-back two-week
+    rounds, and "minibench" is a slug that repoints to whichever round is
+    active. Between the slug repointing and the first question of the new
+    round being created, it legitimately holds nothing.
+
+    Found the hard way on 5 Sept 2026: the first live run of the tournament
+    workflow failed with "MiniBench TOURNAMENT NOT FOUND", two days before a
+    round we were entering. Treating that as fatal would have reddened every
+    run for two days, and then again in the gap after every future round —
+    permanently, every fortnight. Red that always fires is the same as no red
+    at all, and this project has exactly one alarm channel.
+
+    The cost of the softer treatment is honest: if the MiniBench slug ever
+    really did change, we would see a warning rather than a failure. That is
+    accepted deliberately, because the alternative guarantees alarm fatigue in
+    exchange for detecting something Metaculus documents as fixed ("the
+    project ID for the currently active minibench is always minibench").
 
     Fetches explicitly rather than letting forecast_on_tournament do it,
     because that discards the question COUNT, and the count is what separates a
@@ -793,13 +829,34 @@ def fetch_and_verify_tournament(client, tournament_id, label: str):
             )
         )
         if not sample:
-            return [], SEASON_MISSING_MESSAGE.format(
+            message = SEASON_MISSING_MESSAGE.format(
                 tournament=tournament_id,
                 label=label,
                 fix=SEASON_MISSING_FIXES.get(
                     label, SEASON_MISSING_FIXES["Seasonal"]
                 ),
             )
+            if empty_is_fatal:
+                return [], message
+            # A SEPARATE message, not the fatal one. Audit, 5 Sept 2026: the
+            # first version reused SEASON_MISSING_MESSAGE, so the log read
+            # "NOT FAILING THE RUN: TOURNAMENT NOT FOUND ... that is a wrong
+            # or retired ID" — telling the reader it is definitely broken in
+            # the same breath as declining to act. Useless at 7am.
+            soft = (
+                f"{label} holds no questions yet ({tournament_id!r}). Normal "
+                "in the gap between MiniBench rounds, so the run is NOT being "
+                "failed. If this persists past the advertised start date of "
+                "the round, the slug has changed — check the MiniBench "
+                "tournament page and the Metaculus Discord."
+            )
+            logger.warning(soft)
+            # A python warning produces no GitHub annotation, so on a green run
+            # it is invisible unless somebody opens the log and scrolls. This
+            # is now the ONLY detector for a dead MiniBench slug, so it gets a
+            # yellow flag on the run page for the price of one print.
+            print(f"::warning title={label} holds no questions::{soft}")
+            return [], None
         logger.info(
             "%r holds %d questions, none open right now. Normal between windows.",
             tournament_id,
@@ -1784,7 +1841,11 @@ if __name__ == "__main__":
         # if the "minibench" slug ever changes it would forecast nothing,
         # silently, green, for as long as nobody looked.
         minibench_questions, minibench_problem = fetch_and_verify_tournament(
-            client, client.CURRENT_MINIBENCH_ID, "MiniBench"
+            client,
+            client.CURRENT_MINIBENCH_ID,
+            "MiniBench",
+            # Empty between rounds is normal for MiniBench, not broken.
+            empty_is_fatal=False,
         )
         if minibench_problem:
             logger.error(minibench_problem)

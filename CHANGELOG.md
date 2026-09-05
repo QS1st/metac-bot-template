@@ -12,6 +12,57 @@ different bot.
 
 ---
 
+## 2026-09-05 (same day, second pass) — an empty MiniBench is not a broken one
+
+The first live run of the tournament workflow failed:
+
+    REFUSING TO PASS: MiniBench TOURNAMENT NOT FOUND: 'minibench' contains no
+    questions at all.
+
+Correct behaviour by the guard, wrong assumption underneath it. MiniBench is a
+chain of back-to-back two-week rounds and `minibench` is a slug that repoints to
+whichever round is active, so between the repoint and the first question of the
+new round it legitimately holds nothing. The 7–25 September round had not been
+populated. Treating that as fatal would have reddened every run for two days,
+and again in the gap after every future round — permanently, every fortnight.
+
+`fetch_and_verify_tournament` now takes a **keyword-only** `empty_is_fatal`,
+defaulting to `True`. The MiniBench call alone passes `False`: an empty
+tournament there logs a warning, raises a GitHub `::warning` annotation so it is
+visible on a green run without opening the log, and does not fail the run. The
+seasonal call is unchanged and still fatal, because a season runs continuously
+for four months and empty there does mean broken.
+
+The cost is stated plainly: if the MiniBench slug ever really changed we would
+now see a warning rather than a failure. Accepted deliberately — the alternative
+guarantees alarm fatigue every fortnight, and red that always fires is the same
+as no red at all.
+
+**Three faults found by audit of that fix, all now closed**
+
+1. `empty_is_fatal` was positional, so `fetch_and_verify_tournament(client, id,
+   "Seasonal", False)` would silently disarm the season for four months. Made
+   keyword-only.
+2. `NO_SEASON_EXPIRY` moved from 28 to 30 September. On the 28th *both* settings
+   would have been red if Metaculus creates the Fall project before populating
+   it — `none` because the sentinel had expired, `33121` because an empty
+   seasonal tournament is fatal. We now have direct evidence they do exactly
+   that, from MiniBench on this very day. A guaranteed red morning is not a
+   safety feature; it is 144 emails, and the obvious way to stop them is to
+   disarm the seasonal guard permanently.
+3. The tests for this change were five regexes, and all five stayed green
+   through the precise refactor they existed to catch — including moving the
+   opt-out from the MiniBench call to the seasonal one. Replaced with tests that
+   call the function against a stub client, including one asserting the
+   positional form now raises `TypeError`.
+
+The non-fatal path also got its own message. It previously reused
+`SEASON_MISSING_MESSAGE`, so the log read "NOT FAILING THE RUN: TOURNAMENT NOT
+FOUND … that is a wrong or retired ID" — telling the reader it was definitely
+broken in the same breath as declining to act.
+
+---
+
 ## 2026-09-05 — a declared "no season" state, and its expiry date
 
 **Why.** The Fall 2026 tournament exists (`33121`, `fall-futureeval-2026`) but
