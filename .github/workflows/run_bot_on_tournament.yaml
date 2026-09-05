@@ -62,14 +62,30 @@ jobs:
         env:
           # Repository VARIABLES (not secrets), and not visible to the process
           # unless passed through here — an unset variable renders as an empty
-          # string. AIB_TOURNAMENT_ID is REQUIRED in tournament mode: unset, the
-          # bot forecasts MiniBench, skips the seasonal half and fails the run.
-          # There is no longer a fallback to the SDK constant, which was pinned
-          # to Summer 2026 and would have forecast a finished tournament.
-          #   AIB_TOURNAMENT_ID  the seasonal tournament, for the September
-          #                      rollover the pinned SDK cannot do for us.
-          #   MODEL_TIER         free | test | season, so the tier can change
-          #                      without a commit and a CI cycle.
+          # string. There is no fallback to the SDK constant, which is pinned to
+          # Summer 2026 and would have forecast a finished tournament.
+          #
+          #   AIB_TOURNAMENT_ID  REQUIRED in tournament mode. Three states:
+          #                        <id or slug>  forecast that season.
+          #                                      Fall 2026 = 33121
+          #                                      (fall-futureeval-2026), opens
+          #                                      28 Sept 2026.
+          #                        none          NO season right now, declared
+          #                                      deliberately. MiniBench only,
+          #                                      run stays green. EXPIRES on
+          #                                      28 Sept 2026, after which it
+          #                                      reds — because every seasonal
+          #                                      detector sits behind it, and a
+          #                                      forgotten "none" would forfeit
+          #                                      a whole season while looking
+          #                                      perfectly healthy.
+          #                        unset/blank   run goes red. MiniBench is
+          #                                      still forecast first.
+          #
+          #   MODEL_TIER         free | test | trial | season, so the tier can
+          #                      change without a commit and a CI cycle. A
+          #                      scored tournament REFUSES to run on free or
+          #                      test — see assert_tier_matches_mode.
           AIB_TOURNAMENT_ID: ${{ vars.AIB_TOURNAMENT_ID }}
           MODEL_TIER: ${{ vars.MODEL_TIER }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
