@@ -73,7 +73,7 @@ jobs:
           #                        none          NO season right now, declared
           #                                      deliberately. MiniBench only,
           #                                      run stays green. EXPIRES on
-          #                                      28 Sept 2026, after which it
+          #                                      30 Sept 2026, after which it
           #                                      reds — because every seasonal
           #                                      detector sits behind it, and a
           #                                      forgotten "none" would forfeit
@@ -81,6 +81,11 @@ jobs:
           #                                      perfectly healthy.
           #                        unset/blank   run goes red. MiniBench is
           #                                      still forecast first.
+          #                      NOTE the two days of grace past the 28th are
+          #                      deliberate: Metaculus creates a tournament
+          #                      project before populating it, and an empty
+          #                      seasonal tournament is fatal by design. Do not
+          #                      set the real ID until Fall HAS questions.
           #
           #   MODEL_TIER         free | test | trial | season, so the tier can
           #                      change without a commit and a CI cycle. A
@@ -96,3 +101,24 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+
+      # main.py writes its own verdict to the run page, but only if it reaches
+      # the end. A crash — a bad MODEL_TIER, an API error, a dependency
+      # failure — dies before that and leaves the run page blank, so the only
+      # way to find out what happened is to scroll two thousand log lines.
+      # Audit, 6 Sept 2026. This step runs ONLY on failure and only if nothing
+      # was written, so it can never talk over a real summary.
+      - name: Explain an unexplained failure
+        if: failure()
+        run: |
+          if [ ! -s "$GITHUB_STEP_SUMMARY" ]; then
+            echo "## CRASHED before writing a summary" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The bot died before it could report. Common causes, in order of likelihood:" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- \`MODEL_TIER\` is unset or not one of free/test/trial/season. A scored tournament refuses to run on \`test\`." >> "$GITHUB_STEP_SUMMARY"
+            echo "- A required secret is missing (\`METACULUS_TOKEN\`, \`OPENROUTER_API_KEY\`)." >> "$GITHUB_STEP_SUMMARY"
+            echo "- The Metaculus API returned an error while fetching questions." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Open the **Run bot** step and read the last twenty lines." >> "$GITHUB_STEP_SUMMARY"
+          fi
