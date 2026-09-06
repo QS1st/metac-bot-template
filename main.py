@@ -68,6 +68,23 @@ EMPTY_RESEARCH_COUNT = 0
 EMPTY_RESEARCH_MIN_TO_FAIL = 3
 EMPTY_RESEARCH_FAIL_RATE = 0.5
 
+# Non-fatal things the run wants to say on the GitHub run page. Audit,
+# 6 Sept 2026: without this the step summary printed "OK - no open questions"
+# on the exact run where MiniBench had gone empty, talking over the only
+# detector we have for a dead slug. A summary that contradicts the warning is
+# worse than no summary.
+RUN_WARNINGS: list[str] = []
+
+# Questions each half actually HELD, before skip_previously_forecasted drops
+# the ones already done. Without it the summary could only report questions
+# attempted, which is 0 both when the tournament is empty and when everything
+# is already forecast — the normal steady state for most runs. Those two need
+# to look different at a glance.
+QUESTIONS_FOUND: dict = {}
+
+# Filled by preflight_check_balance(). None means "could not tell".
+BALANCE_NOTE = None
+
 # =============================================================================
 # PHASE 1 CONFIGURATION  —  all tunables live here, nowhere else.
 #
@@ -452,6 +469,160 @@ def assert_tier_matches_mode(run_mode: str) -> None:
         )
 
 
+def write_step_summary(
+    *, run_mode, submitted, failed, attempted, thin_research, problems,
+    seasonal_id, tournament_url,
+) -> None:
+    """Write the run verdict to the GitHub run page. NEVER raises.
+
+    Reading a run meant scrolling roughly two thousand log lines in a
+    virtualised viewer that actively fights you: innerText returns page
+    chrome, the raw-log endpoint 404s, and the step anchors stopped working.
+    Over four months of unattended running that is the difference between
+    noticing a problem and not noticing it, and noticing is the entire second
+    pillar of this bot.
+
+    GITHUB_STEP_SUMMARY renders markdown at the top of the run page, above the
+    logs, visible without opening anything. check_group_questions.py has done
+    this since 2 Sept 2026; the bot itself did not, which was backwards — the
+    diagnostic ran once and the bot runs 144 times a day.
+
+    Written BEFORE the exit decision, deliberately, so a red run gets a
+    summary too. A red run is the one somebody actually needs to read.
+    """
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        if problems:
+            verdict = f"REFUSING TO PASS - {len(problems)} problem(s)"
+        elif failed and not submitted:
+            verdict = f"FAILED - all {failed} question(s) errored"
+        elif failed:
+            verdict = f"PARTIAL - {submitted} submitted, {failed} failed"
+        elif submitted:
+            verdict = f"OK - {submitted} forecast(s) submitted"
+        elif RUN_WARNINGS:
+            # Do NOT say OK here. This is the shape of a dead MiniBench slug
+            # or an exhausted balance: nothing forecast, and a reason why.
+            verdict = "NOTHING FORECAST - see warnings below"
+        else:
+            verdict = "OK - nothing new to forecast"
+        season = (
+            f"`{seasonal_id}`"
+            if seasonal_id is not None
+            else "skipped, no season declared (AIB_TOURNAMENT_ID)"
+        )
+        rows = [
+            ("Mode", f"`{run_mode}`"),
+            (
+                "Model tier",
+                f"`{MODEL_TIER}` - {predictions_per_report()} prediction(s) "
+                "per question",
+            ),
+            ("Seasonal tournament", season),
+            ("Questions attempted", str(attempted)),
+            ("Submitted", str(submitted)),
+            ("Failed", str(failed)),
+            ("Thin research", f"{thin_research} of {attempted}"),
+        ]
+        for half in ("MiniBench", "Seasonal"):
+            if half in QUESTIONS_FOUND:
+                rows.append(
+                    (f"{half} open questions", str(QUESTIONS_FOUND[half]))
+                )
+        if BALANCE_NOTE:
+            rows.append(("OpenRouter", BALANCE_NOTE))
+        if tournament_url:
+            rows.append(("Target", tournament_url))
+        lines = [f"## {verdict}", "", "| Field | Value |", "|---|---|"]
+        # A newline or a pipe inside any of these would break the table or
+        # escape a bullet. Not reachable today, but it becomes reachable the
+        # moment anything dynamic is added, and the failure is silent.
+        def _cell(value):
+            return str(value).replace("|", "&#124;").replace("\n", " ")
+
+        lines += [f"| {_cell(k)} | {_cell(v)} |" for k, v in rows]
+        if problems:
+            lines += ["", "### Problems", ""]
+            lines += [f"- {_cell(p)}" for p in problems]
+        if RUN_WARNINGS:
+            lines += ["", "### Warnings", ""]
+            lines += [f"- {_cell(w)}" for w in RUN_WARNINGS]
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except Exception as exc:
+        # An observability aid must never become a new way for the run to die.
+        logger.warning("Could not write the GitHub step summary: %s", exc)
+
+
+# Warn below this. One MiniBench question costs about $0.06 on the trial tier,
+# so a dollar is roughly fifteen questions — enough to notice and top up
+# before a round is forfeited, without crying wolf.
+BALANCE_WARN_USD = 1.00
+
+
+def preflight_check_balance() -> None:
+    """Log the OpenRouter balance before forecasting. NEVER raises.
+
+    The highest-cost failure available to us that nothing was watching for.
+    An exhausted balance mid-round means every prediction 402s, every sample
+    fails, and the questions are forfeited — and we would learn about it from
+    a red run AFTER the three-hour window had closed. Peer scores are summed
+    and then squared, so forfeited questions compound.
+
+    Audit, 6 Sept 2026, which noted the only preflight we had returned
+    immediately on every tier except "free" — the one tier that cannot run out
+    of money.
+
+    The response shape of /api/v1/key is NOT verified against a live key (the
+    key lives in GitHub secrets and is never read locally), so every field is
+    treated as optional and absence is reported honestly rather than guessed
+    at. The key itself is never logged.
+    """
+    global BALANCE_NOTE
+    if MODEL_TIER == "free":
+        return
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        return
+    import json
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/key",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode()) or {}
+        data = payload.get("data") or {}
+        usage = data.get("usage")
+        remaining = data.get("limit_remaining")
+        limit = data.get("limit")
+        parts = []
+        if isinstance(usage, (int, float)):
+            parts.append(f"used ${usage:.2f}")
+        if isinstance(limit, (int, float)):
+            parts.append(f"limit ${limit:.2f}")
+        if isinstance(remaining, (int, float)):
+            parts.append(f"remaining ${remaining:.2f}")
+        BALANCE_NOTE = ", ".join(parts) if parts else "no figures returned"
+        logger.info("OpenRouter key: %s", BALANCE_NOTE)
+        if isinstance(remaining, (int, float)) and remaining < BALANCE_WARN_USD:
+            msg = (
+                f"OpenRouter balance is LOW: ${remaining:.2f} remaining. At "
+                "roughly $0.06 a question this is nearly spent. Forecasts will "
+                "start failing mid-round and those questions are forfeited."
+            )
+            logger.warning(msg)
+            RUN_WARNINGS.append(msg)
+            print(f"::warning title=OpenRouter balance low::{msg}")
+    except Exception as exc:  # a health check must never break the run
+        BALANCE_NOTE = None
+        logger.warning("Could not read the OpenRouter balance (%s)", exc)
+
+
 def preflight_check_free_models() -> None:
     """Log the serving status of each configured free model. Never raises.
 
@@ -804,6 +975,7 @@ def fetch_and_verify_tournament(
     working tournament from a dead one.
     """
     questions = client.get_all_open_questions_from_tournament(tournament_id)
+    QUESTIONS_FOUND[label] = len(questions)
     logger.info(
         "%s tournament %r: %d open questions", label, tournament_id, len(questions)
     )
@@ -851,6 +1023,7 @@ def fetch_and_verify_tournament(
                 "tournament page and the Metaculus Discord."
             )
             logger.warning(soft)
+            RUN_WARNINGS.append(soft)
             # A python warning produces no GitHub annotation, so on a green run
             # it is invisible unless somebody opens the log and scrolls. This
             # is now the ONLY detector for a dead MiniBench slug, so it gets a
@@ -1823,6 +1996,7 @@ if __name__ == "__main__":
     template_bot.predictions_per_research_report = predictions_per_report()
     assert_tier_matches_mode(run_mode)
     preflight_check_free_models()
+    preflight_check_balance()
 
     # Dispatch on mode. Each branch produces a list of ForecastReport (or
     # exceptions, since return_exceptions=True) which then flows into the
@@ -1970,6 +2144,17 @@ if __name__ == "__main__":
                 EMPTY_RESEARCH_COUNT,
                 attempted,
             )
+
+    write_step_summary(
+        run_mode=run_mode,
+        submitted=len(successes),
+        failed=len(failures),
+        attempted=attempted,
+        thin_research=EMPTY_RESEARCH_COUNT,
+        problems=problems,
+        seasonal_id=seasonal_id,
+        tournament_url=TOURNAMENT_URLS.get(run_mode),
+    )
 
     if problems:
         raise SystemExit("REFUSING TO PASS: " + " | ".join(problems))

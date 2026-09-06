@@ -12,6 +12,57 @@ different bot.
 
 ---
 
+## 2026-09-06 — the run verdict on the run page, and a balance preflight
+
+**Observability.** Reading a run meant scrolling roughly two thousand log lines
+in a viewer that fights you. `write_step_summary()` now writes a markdown
+verdict to `$GITHUB_STEP_SUMMARY`, which renders at the top of the run page:
+verdict, mode, model tier, questions found and attempted, submitted, failed,
+thin research, balance, and every problem verbatim. It is written *before* the
+exit decision, so a red run gets one too — that being the run somebody actually
+needs to read. It returns early when the variable is absent and swallows every
+exception, because an observability aid must never become a new way to die.
+
+**A balance preflight, which is the one that could have cost a round.** The only
+preflight we had returned immediately on every tier except `free` — the one tier
+that cannot run out of money. An exhausted OpenRouter balance mid-round means
+every prediction 402s, every sample fails, and the questions are forfeited; we
+would have learned about it from a red run *after* the three-hour window closed,
+and forfeited questions compound because peer scores are summed then squared.
+`preflight_check_balance()` now reads `/api/v1/key` once at startup, logs usage
+and remaining, and raises a `::warning` below $1. The API key is never logged.
+The response shape is not verified against a live key — it lives in GitHub
+secrets and is never read locally — so every field is treated as optional and
+absence is reported honestly rather than guessed at.
+
+**Three faults found by audit of the above, all closed**
+
+1. The summary said `OK - no open questions this run` on the exact run where
+   MiniBench had gone empty — talking over the `::warning` that is our only
+   detector for a dead slug. Non-fatal warnings are now collected in
+   `RUN_WARNINGS`, printed in the summary under their own heading, and the
+   verdict becomes `NOTHING FORECAST - see warnings below`.
+2. The summary reported only questions *attempted*, which is zero both when a
+   tournament is empty and when everything is already forecast — the normal
+   steady state for most runs. `QUESTIONS_FOUND` now records what each half
+   actually held, so those two states look different at a glance.
+3. A crash before the summary left the run page blank. The workflow gained a
+   step that runs only on failure, and only when nothing has been written, to
+   name the likely causes.
+
+Also: table cells and bullets are escaped against pipes and newlines (not
+reachable today, but silent when it becomes so); the workflow comment said the
+sentinel expires on 28 September when the code says the 30th; and the test
+harness could not lift annotated assignments, reporting a present constant as
+"patch did not apply" — a false alarm indistinguishable from a real build
+failure.
+
+The tests for this change are behavioural: they write a real file and read it
+back, covering the clean, partial, all-failed, refusing, nothing-forecast and
+hostile-character cases.
+
+---
+
 ## 2026-09-05 (same day, second pass) — an empty MiniBench is not a broken one
 
 The first live run of the tournament workflow failed:

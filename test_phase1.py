@@ -50,8 +50,15 @@ def load(*names, consts=()):
     wanted_consts = set(consts)
     found = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        # AnnAssign as well as Assign. "RUN_WARNINGS: list[str] = []" is an
+        # annotated assignment, and lifting only plain ones meant the loader
+        # reported "patch did not apply" for a constant that was present and
+        # correct — a false alarm that looks exactly like a real build failure.
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if isinstance(node, ast.AnnAssign):
+                targets = [node.target.id] if isinstance(node.target, ast.Name) else []
+            else:
+                targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
             if wanted_consts.intersection(targets):
                 code = compile(
                     ast.Module(body=[node], type_ignores=[]), "main.py", "exec"
@@ -464,7 +471,8 @@ def run():
     # project has already written up twice: a test that agrees with itself.
     fetchv, modsF = load("fetch_and_verify_tournament",
                          consts=("SEASON_MISSING_MESSAGE", "SEASON_MISSING_FIXES",
-                                 "SKIP_GROUP_QUESTIONS", "BOT_TOURNAMENT_SLUG_MARKERS"))
+                                 "SKIP_GROUP_QUESTIONS", "BOT_TOURNAMENT_SLUG_MARKERS",
+                                 "QUESTIONS_FOUND", "RUN_WARNINGS"))
     import asyncio as _aio
     modsF.asyncio = _aio
     modsF.ApiFilter = lambda **kw: kw
@@ -511,6 +519,110 @@ def run():
           bool(_re.search(r'fetch_and_verify_tournament\(\s*\n?\s*client, seasonal_id, "Seasonal"\s*\n?\s*\)', src)), True)
     check("an empty non-fatal tournament raises a GitHub annotation, not just a log line",
           bool(_re.search(r'::warning title=', src)), True)
+
+    print("\n  -- the run verdict reaches the GitHub run page --")
+    # Reading a run meant scrolling ~2000 log lines. Over four months that is
+    # the difference between noticing a problem and not. Tested behaviourally:
+    # the function writes a real file and we read it back.
+    wss, modsS = load("write_step_summary",
+                      consts=("RUN_WARNINGS", "QUESTIONS_FOUND", "BALANCE_NOTE"))
+    modsS.predictions_per_report = lambda: 5
+
+    import tempfile as _tf, pathlib as _pl
+    def _summary(**kw):
+        base = dict(run_mode="tournament", submitted=0, failed=0, attempted=0,
+                    thin_research=0, problems=[], seasonal_id=None,
+                    tournament_url="https://example.invalid/t/")
+        base.update(kw)
+        with _tf.TemporaryDirectory() as d:
+            p = _pl.Path(d) / "summary.md"
+            _os.environ["GITHUB_STEP_SUMMARY"] = str(p)
+            try:
+                wss(**base)
+                return p.read_text() if p.exists() else ""
+            finally:
+                _os.environ.pop("GITHUB_STEP_SUMMARY", None)
+
+    out = _summary(submitted=3, attempted=3)
+    check("a clean run reports OK and the count", "OK - 3 forecast(s) submitted" in out, True)
+    check("...and names the model tier actually used", f"`{modsS.MODEL_TIER}`" in out, True)
+    check("...and says the season was skipped when there is none",
+          "no season declared" in out, True)
+
+    out = _summary(submitted=2, failed=1, attempted=3)
+    check("a partial run is PARTIAL, not OK", out.startswith("## PARTIAL"), True)
+    out = _summary(submitted=0, failed=3, attempted=3)
+    check("a run where everything errored is FAILED", out.startswith("## FAILED"), True)
+
+    # The most important case: a RED run must still get a summary, and the
+    # problems must be IN it. That is the run somebody actually has to read.
+    out = _summary(problems=["AIB_TOURNAMENT_ID is not set.", "second problem"])
+    check("a refusing run still writes a summary", bool(out), True)
+    check("...leads with REFUSING TO PASS", out.startswith("## REFUSING TO PASS"), True)
+    check("...and lists every problem verbatim",
+          ("AIB_TOURNAMENT_ID is not set." in out) and ("second problem" in out), True)
+
+    # It must be written BEFORE the exit decision, or a red run gets nothing.
+    _w = src.find("write_step_summary(")
+    _x = src.find('raise SystemExit("REFUSING TO PASS: "')
+    check("both the summary call and the exit exist", (_w > -1 and _x > -1), True)
+    check("the summary is written before the run can exit", _w < _x, True)
+
+    # And it must never become a new way for the run to die.
+    _os.environ.pop("GITHUB_STEP_SUMMARY", None)
+    try:
+        wss(run_mode="tournament", submitted=1, failed=0, attempted=1,
+            thin_research=0, problems=[], seasonal_id=None, tournament_url=None)
+        survived_unset = True
+    except Exception:
+        survived_unset = False
+    check("no GITHUB_STEP_SUMMARY set is a no-op, not a crash", survived_unset, True)
+
+    _os.environ["GITHUB_STEP_SUMMARY"] = "/nonexistent-dir-xyz/summary.md"
+    try:
+        wss(run_mode="tournament", submitted=1, failed=0, attempted=1,
+            thin_research=0, problems=[], seasonal_id=None, tournament_url=None)
+        survived_bad = True
+    except Exception:
+        survived_bad = False
+    finally:
+        _os.environ.pop("GITHUB_STEP_SUMMARY", None)
+    check("an unwritable path warns rather than killing the run", survived_bad, True)
+
+    # A run that forecast nothing BECAUSE something is wrong must not say OK.
+    # Audit, 6 Sept 2026: the summary printed "OK - no open questions" on the
+    # exact run where MiniBench had gone empty, talking over the only detector
+    # we have for a dead slug.
+    modsS.RUN_WARNINGS = ["MiniBench holds no questions yet"]
+    out = _summary()
+    check("nothing forecast WITH a warning is not reported as OK",
+          out.startswith("## NOTHING FORECAST"), True)
+    check("...and the warning itself is printed", "MiniBench holds no" in out, True)
+    modsS.RUN_WARNINGS = []
+    out = _summary()
+    check("nothing forecast with NO warning is a quiet OK",
+          out.startswith("## OK - nothing new"), True)
+
+    # Questions FOUND is not the same as questions attempted: attempted is 0
+    # both when the tournament is empty and when everything is already
+    # forecast, which is the normal steady state for most runs.
+    modsS.QUESTIONS_FOUND = {"MiniBench": 5}
+    out = _summary(submitted=0, attempted=0)
+    check("the summary distinguishes questions found from questions attempted",
+          "MiniBench open questions" in out and "| 5 |" in out, True)
+    modsS.QUESTIONS_FOUND = {}
+
+    # Problems on one half must not hide successful work on the other.
+    out = _summary(submitted=2, attempted=2, problems=["seasonal half broke"])
+    check("a refusal still records what DID get submitted",
+          "| Submitted | 2 |" in out, True)
+
+    # Markdown safety. Not reachable today; it becomes reachable the moment
+    # anything dynamic reaches these strings, and it fails silently.
+    out = _summary(problems=["pipe | inside", "two\nlines"])
+    check("a pipe cannot break out of a cell or bullet", "|" not in out.split("### Problems")[1], True)
+    check("a newline cannot escape its bullet",
+          out.split("### Problems")[1].strip().count("\n"), 1)
 
     seasonal, mods3 = load("resolve_seasonal_tournament",
                            consts=("SEASON_MISSING_MESSAGE", "NO_SEASON_VALUES",
