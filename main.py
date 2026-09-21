@@ -1546,6 +1546,8 @@ class SummerTemplateBot2026(ForecastBot):
             - Please notice the units requested and give your answer in these units (e.g. whether you represent a number as 1,000,000 or 1 million).
             - Never use scientific notation.
             - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.
+            - WHOLE-NUMBER OUTCOMES. Some questions ask for a count — launches, cases, seats, people, events — where the answer can only be a whole number. You are asked for percentiles on a continuous scale, so it is possible to put probability on 0.3 or 1.5. Those are outcomes that cannot happen, and probability placed there is simply thrown away.
+            - If the quantity can only be a whole number, say so explicitly in your reasoning, then straddle the ONE OR TWO most likely whole numbers with a close pair of percentiles (for example 0.99 and 1.01), so that probability lands where the answer can actually be. Keep the values strictly increasing.\n            - Do NOT straddle more than two whole numbers, and do NOT spend percentiles 10 and 90 on straddles. Those two stay ordinary wide tail values. Six percentiles only buy you two or three straddles, and a distribution that spends all of them on spikes has no tails left — which loses far more when the answer falls outside the spikes than the spikes gain when it does not.
 
             Before answering you write:
             (a) The time left until the outcome to the question is known.
@@ -1583,6 +1585,7 @@ class SummerTemplateBot2026(ForecastBot):
             The text given to you is trying to give a forecast distribution for a numeric question.
             - This text is trying to answer the numeric question: "{question.question_text}".
             - When parsing the text, please make sure to give the values (the ones assigned to percentiles) in terms of the correct units.
+            - Preserve the values exactly as written, including small decimal offsets such as 0.99 or 1.01. Do NOT round them to whole numbers.
             - The units for the forecast are: {question.unit_of_measure}
             - Your work will be shown publicly with these units stated verbatim after the numbers your parse.
             - As an example, someone else guessed that the answer will be between {question.lower_bound} {question.unit_of_measure} and {question.upper_bound} {question.unit_of_measure}, so the numbers parsed from an answer like this would be verbatim "{question.lower_bound}" and "{question.upper_bound}".

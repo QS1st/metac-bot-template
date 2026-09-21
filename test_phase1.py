@@ -864,6 +864,55 @@ def run():
     check("numeric and date samples force CDF expansion per sample",
           len(_re.findall(r"prediction\.get_cdf\(\)", src)), 2)
     # Our own parsing instruction used to manufacture the validator's rejection.
+    print("\n  -- whole-number outcomes keep their probability mass --")
+    # MEASURED, not theoretical. MiniBench q45541 asked how many SpaceX orbital
+    # launches would occur on a day. All five samples answered 0.0 / 0.1 / 0.3 /
+    # 0.6 / 1.0 / 1.5, spreading mass across values a count cannot take. It
+    # RESOLVED AT 1, sitting at our 80th percentile where the density is
+    # thinnest. Laertes' maker reported the same class of loss in Discord on
+    # 19 Sept. MiniBench is ~45% numeric.
+    check("the numeric prompt names whole-number outcomes",
+          "WHOLE-NUMBER OUTCOMES" in src, True)
+    check("...and says why mass on impossible values is lost",
+          bool(_re.search(r"cannot happen, and probability placed there is simply thrown away", src)), True)
+    check("...and asks the model to straddle the whole number",
+          bool(_re.search(r"straddle the ONE OR TWO most likely whole numbers", src)), True)
+    check("...with a worked example of the offset pair",
+          bool(_re.search(r"for example 0\.99 and 1\.01", src)), True)
+    # The straddle avoids emitting REPEATED percentile values. Note the honest
+    # position, measured against the pinned SDK on 21 Sept 2026: repeating
+    # actually scores BETTER (0.19 of the mass in the resolution bin against
+    # 0.102), because the repair helper nudges in-bounds repeats DOWN. We
+    # straddle anyway because that helper is open SDK issue #212 with an unmerged
+    # fix, so the direction could reverse mid-season. Robust, not optimal.
+    check("...and to keep the values strictly increasing",
+          bool(_re.search(r"Keep the values strictly increasing", src)), True)
+    # And it must be a PROMPT change only. This project has already lost points
+    # to its own percentile surgery once (_sorted_percentiles, retracted 31 Aug).
+    check("no new percentile post-processing was added",
+          len(_re.findall(r"def _\w*percentile\w*\(", src)), 1)
+    # Bound to the numeric function's SPAN, not just "before the date prompt".
+    # The previous form used str.index, which returns the FIRST match, so a stray
+    # second copy inside the date prompt would have passed. Audit, 21 Sept 2026.
+    check("the instruction appears exactly once",
+          src.count("WHOLE-NUMBER OUTCOMES"), 1)
+    _num = src.index("async def _run_forecast_on_numeric")
+    _dat = src.index("async def _run_forecast_on_date")
+    _ins = src.index("WHOLE-NUMBER OUTCOMES")
+    check("...inside _run_forecast_on_numeric, not the date path",
+          _num < _ins < _dat, True)
+
+    # The straddle is capped and the tails are protected. Without this the model
+    # can spend all six percentiles on spikes; an audit measured that as a ~3 nat
+    # loss when the answer falls outside them, against ~1.7 gained when it does not.
+    check("the straddle is capped at two whole numbers",
+          bool(_re.search(r"Do NOT straddle more than two whole numbers", src)), True)
+    check("...and percentiles 10 and 90 are protected as tails",
+          bool(_re.search(r"do NOT spend percentiles 10 and 90 on straddles", src)), True)
+    # The parser is a separate cheaper model and would otherwise round the pair away.
+    check("the parser is told not to round the offsets away",
+          bool(_re.search(r"Do NOT round them to whole numbers", src)), True)
+
     check("the parser is told never to emit a literal zero",
           bool(_re.search(r"NEVER emit exactly 0", src)), True)
     check("and to make the probabilities sum to 1",

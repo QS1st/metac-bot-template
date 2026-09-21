@@ -16,7 +16,7 @@ import pathlib
 SRC = pathlib.Path(sys.argv[1])
 DST = pathlib.Path(sys.argv[2])
 
-text = SRC.read_text()
+text = SRC.read_text(encoding="utf-8")
 edits = 0
 
 
@@ -552,5 +552,72 @@ replace(
     "one shared MetaculusClient, with a shorter inter-request sleep",
 )
 
-DST.write_text(text)
+# ---------------------------------------------------------------------------
+# 20. INTEGER-VALUED NUMERIC QUESTIONS  (measured loss, 21 Sept 2026)
+#
+#     MiniBench q45541 asked how many SpaceX orbital launches would occur on a
+#     given day. The outcome can only be a whole number. All five of our samples
+#     answered with percentiles like 0.0 / 0.1 / 0.3 / 0.6 / 1.0 / 1.5 —
+#     spreading probability across 0.1, 0.3, 0.6 and 1.5, none of which the
+#     outcome can ever take. The question RESOLVED AT 1, which sat at our 80th
+#     percentile where the density is thinnest. We scored badly on a question
+#     whose research had actually told us the right shape.
+#
+#     Independently corroborated: the maker of Laertes (top-10, Spring) posted in
+#     the Metaculus Discord on 19 Sept that his bot "bombed this minibench
+#     question because there were 201 bins instead of one for each integer".
+#     Metaculus publishes integer-valued quantities as continuous 201-bin
+#     questions, so this hits every bot that does not handle it — and MiniBench
+#     is roughly 45% numeric/discrete.
+#
+#     WHY THIS IS A PROMPT FIX AND NOT CODE. This project has already lost
+#     points once to its own clever percentile surgery (_sorted_percentiles, a
+#     self-inflicted own-goal, retracted 31 Aug). That precedent alone is the
+#     reason: the instruction goes to the model and no post-processing is added.
+#
+#     WHY STRADDLE RATHER THAN REPEAT, stated honestly because this file is the
+#     disclosure document. An audit on 21 Sept 2026 ran the pinned SDK and
+#     measured it. Repeating a value actually scores BETTER than straddling
+#     (0.19 of the mass in the resolution bin against 0.102), because
+#     _check_and_update_repeating_values nudges in-bounds repeats DOWN — not up,
+#     as an earlier draft of this comment wrongly claimed. But that helper is the
+#     subject of open SDK issue #212, whose fix (PR #166) has been unmerged since
+#     December 2025, so the direction of that nudge could reverse under us
+#     mid-season. Straddling is therefore the ROBUST choice, not the optimal one:
+#     splitting the atom across the bin edge means we cannot lose all of it to a
+#     convention we have read wrongly or that changes beneath us. The measured
+#     price of that insurance is about 0.6 nats per integer question.
+#
+#     This is a mitigation, not a discrete pipeline. The full fix is CDF-space
+#     construction of the kind nostreambot documents, and that is a bigger job
+#     than the week before the season allows.
+# ---------------------------------------------------------------------------
+replace(
+    "            - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.",
+    "            - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.\n"
+    "            - WHOLE-NUMBER OUTCOMES. Some questions ask for a count \u2014 launches, cases, seats, people, events \u2014 where the answer can only be a whole number. You are asked for percentiles on a continuous scale, so it is possible to put probability on 0.3 or 1.5. Those are outcomes that cannot happen, and probability placed there is simply thrown away.\n"
+    "            - If the quantity can only be a whole number, say so explicitly in your reasoning, then straddle the ONE OR TWO most likely whole numbers with a close pair of percentiles (for example 0.99 and 1.01), so that probability lands where the answer can actually be. Keep the values strictly increasing.\\n"
+    "            - Do NOT straddle more than two whole numbers, and do NOT spend percentiles 10 and 90 on straddles. Those two stay ordinary wide tail values. Six percentiles only buy you two or three straddles, and a distribution that spends all of them on spikes has no tails left \u2014 which loses far more when the answer falls outside the spikes than the spikes gain when it does not.",
+    "integer-valued numeric questions: keep the mass on achievable values",
+)
+
+# ---------------------------------------------------------------------------
+# 21. THE NUMERIC PARSER MUST NOT ROUND THE STRADDLE AWAY  (audit, 21 Sept 2026)
+#
+#     Edit 20 asks the forecaster to emit close pairs like 0.99 and 1.01. The
+#     parser is a separate, cheaper model, and nothing told it to preserve small
+#     decimal offsets. Rounding both to 1 would collapse the pair into a repeat.
+#
+#     That particular failure is benign — a repeat measures BETTER than a
+#     straddle on the pinned SDK — but it silently discards the insurance edit 20
+#     was buying, and it would do so without any signal. One line closes it.
+# ---------------------------------------------------------------------------
+replace(
+    "            - When parsing the text, please make sure to give the values (the ones assigned to percentiles) in terms of the correct units.",
+    "            - When parsing the text, please make sure to give the values (the ones assigned to percentiles) in terms of the correct units.\n"
+    "            - Preserve the values exactly as written, including small decimal offsets such as 0.99 or 1.01. Do NOT round them to whole numbers.",
+    "numeric parser: preserve small decimal offsets, do not round",
+)
+
+DST.write_text(text, encoding="utf-8")
 print(f"\n{edits} edits applied cleanly -> {DST}")

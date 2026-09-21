@@ -12,6 +12,71 @@ different bot.
 
 ---
 
+## 2026-09-21 — whole-number outcomes keep their probability
+
+**The measured loss.** MiniBench question 45541 asked how many SpaceX orbital
+launches would occur on 17 September. The answer can only be a whole number. All
+five of our samples returned percentiles of the shape `0.0, 0.1, 0.3, 0.6, 1.0,
+1.5`, spreading probability across 0.1, 0.3, 0.6 and 1.5 — values the outcome
+cannot take. **The question resolved at 1**, which sat at roughly our 80th
+percentile where the density is thinnest. Measured against the pinned SDK, our
+distribution placed 0.0124 of its mass in the resolution bin; a straddled one
+places 0.1021. About 2.1 nats on a single question, under a log-based score.
+
+Independently corroborated: the maker of Laertes (top ten, Spring) posted in the
+Metaculus Discord on 19 September that his bot *"bombed this minibench question
+because there were 201 bins instead of one for each integer"*. Metaculus
+publishes integer-valued quantities as continuous 201-bin questions, and
+MiniBench is roughly 45% numeric or discrete.
+
+**The change.** Two bullets added to the numeric forecasting prompt only: name
+whole-number quantities explicitly, straddle the one or two most likely whole
+numbers with a close pair of percentiles, keep percentiles 10 and 90 as ordinary
+wide tails. A third line tells the numeric parser not to round those offsets
+away. No code-level percentile processing was added; that decision rests on this
+project's own retracted `_sorted_percentiles`, which was a self-inflicted loss.
+
+**On the porcupine question, stated plainly because this file is the disclosure
+document.** Metaculus's Spring 2026 analysis describes bots that *"put zero
+weight on decimal values and put full weight on integer values, which inflates
+their score without being an actual indicator of forecasting accuracy"*, calls
+the result a porcupine distribution and a non-skill advantage, and says the
+remedy is converting such questions to Discrete. That passage sits in a
+methodology section rather than the competition rules, and we could find no
+prohibition in the rules themselves.
+
+This change is the same mechanism in a much smaller dose: at most two spikes, on
+quantities that genuinely cannot resolve at a fraction, with the tails left
+intact. We think that is honest forecasting rather than scoring exploitation — a
+human forecaster able to place mass precisely would do the same — but we are not
+going to pretend the distinction is invisible from the outside. We will not
+scale it toward a full porcupine, and we would welcome these questions being
+converted to Discrete, which would make the instruction a no-op.
+
+**Corrected by audit before shipping.** An adversarial pass ran the pinned SDK
+and measured the outcomes, which changed two things:
+
+1. The first draft let the model straddle without limit. Measured, spending all
+   six percentiles on spikes gains about 1.7 nats when the mode is right and
+   loses about 3 when it is not. The instruction is now capped at two whole
+   numbers with the tails protected.
+2. Our stated reason for avoiding a code fix was **wrong**. We had written that
+   SDK issue #212's repair helper nudges repeated percentiles *up*; in the
+   pinned 0.2.92 it nudges in-bounds repeats *down*, and repeating actually
+   scores better than straddling (0.19 against 0.102). We straddle anyway,
+   because that helper has an unmerged fix open since December 2025 and the
+   direction could reverse mid-season. Robust rather than optimal, at a measured
+   cost of about 0.6 nats per integer question.
+
+Also corrected: a test asserting the instruction was "not in the date prompt"
+used `str.index`, which returns the first match, so a stray second copy would
+have passed — it now asserts a single occurrence bounded by the numeric
+function's span. And `patch_phase1.py` now reads and writes with an explicit
+UTF-8 encoding, because this edit introduced the first non-ASCII byte into a
+generated file and the build was relying on the runner's locale.
+
+---
+
 ## 2026-09-06 — the run verdict on the run page, and a balance preflight
 
 **Observability.** Reading a run meant scrolling roughly two thousand log lines
