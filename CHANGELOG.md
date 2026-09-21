@@ -12,6 +12,238 @@ different bot.
 
 ---
 
+## 2026-09-21 (same day, third pass) — the parse paths get guards, and "FIRST" actually comes first
+
+Four changes, batched deliberately so that one paid test run covers the lot.
+
+### 1. Parser guards, ported by hand from forecasting-tools v0.3.0
+
+v0.3.0 (released 7 September) added two guards to *its* copy of the template:
+`_create_resolved_question_parsing_message` and
+`_create_single_distribution_parsing_message`. Bumping the pinned dependency
+would deliver **neither**, because this file vendors its own
+`SummerTemplateBot2026` and every `structure_output` call is ours. So they are
+ported by hand, condensed to two bullets in a shared `_PARSER_GUARDS` constant,
+and wired into all four parse paths.
+
+* **Guard one.** The parser is a cheaper model reading a long reasoning text. If
+  the forecaster discusses a figure as though the matter were settled, the parser
+  can lift *that* figure instead of the forecast. Every FutureEval question is
+  open at forecast time, so a "known outcome" in the text is always the
+  forecaster's framing and never a resolution.
+* **Guard two.** Drafts, worked examples and sensitivity checks all look like
+  final answers. Merging two produces a forecast nobody wrote; averaging them
+  produces one nobody would defend. Last complete answer wins — the same rule
+  `caps_for_reasoning` already applies to the binary flag.
+
+**The binary path had no parsing instructions at all.** It was the one path
+calling `structure_output` with the bare schema and a page of prose, left to
+infer which of several percentages was the answer. It has been getting that
+right, but on inference alone, on roughly half of every round, and on the path
+where the caps live — so a wrong lift produces a confident wrong number rather
+than a failed sample. It now gets two bullets of its own plus the shared guards.
+
+### 2. "FIRST, before anything else" was arriving ninth
+
+The 21 September second pass anchored the still-open guard and the adversarial
+criteria read on the upstream `Before answering you write:` block. The edit
+before it had already inserted four formatting bullets **above** that point, so
+the built numeric prompt opened with scientific notation and bin widths, then
+said "FIRST, before anything else". An instruction that says *first* and arrives
+ninth is not untidy, it is a contradiction, and a model resolves a contradiction
+by ignoring one half of it.
+
+The guard is now anchored on upstream text that sits above the formatting block.
+No wording changed. A test asserts the ordering, and three more assert that the
+bound messages, the formatting block and the guard each appear exactly once —
+because the first build of this change emitted the bound messages twice.
+
+### 3. The numeric flag has its own name, and is now logged
+
+The numeric prompt reused the binary literal, `AMBIGUITY`. That is the exact
+token `caps_for_reasoning()` matches to clamp a binary probability to
+[0.10, 0.90]. Two meanings behind one string in one codebase is a trap for
+whoever reads it next, and it made the numeric flag impossible to grep for.
+
+It is now **`FIGURE AMBIGUITY`** — accurate, because on a numeric question the
+ambiguity is about *which published figure* is being asked for. The two patterns
+cannot match each other: `caps_for_reasoning` anchors its line at `AMBIGUITY`, so
+a line beginning `FIGURE` fails the anchor, and the new
+`_figure_ambiguity_flag()` requires the word `FIGURE` first. Both directions are
+tested.
+
+`_figure_ambiguity_flag()` is **telemetry only**. Nothing acts on its return
+value. It exists because the prompt has been asking for the flag while no line of
+any run log ever mentioned whether one came back, so there was no way to tell a
+model doing the adversarial read from one silently skipping it. The flag remains
+**advisory** on numeric questions: the model is asked to widen its own interval
+and nothing enforces it. Enforcing it would mean rewriting percentiles after the
+fact, which is the `_sorted_percentiles` mistake this project already made once.
+
+### 4. The numeric prompt now labels its resolution criteria
+
+The binary prompt introduces the criteria with a sentence that does two jobs: it
+says what the block is, and it states the convention that the criteria have not
+yet been satisfied. The numeric prompt dropped the criteria in unlabelled,
+between the background and the fine print — and then change 2 above asks for a
+strict reading of a block the prompt never named. Binary's sentence is now used
+verbatim on numeric, so the two cannot drift. The Spring advice notebook prices
+the missing convention directly: bot maker #45 reported losing 90 peer points for
+not telling the model to assume the event had not happened yet.
+
+### 5. What the audit of the above caught, before any of it ran
+
+The four changes were written, then audited adversarially against the real
+library source. The audit found one blocker of mine and one serious gap, both in
+the work above. They are recorded here because this file is the disclosure
+record, not a highlights reel.
+
+**Blocker — the binary parsing instruction was wrong.** The first version told
+the parser to give the probability "as a percentage from 0 to 100". The field it
+fills is `BinaryPrediction.prediction_in_decimal`, whose validator accepts only
+[0, 1]; and `STRUCTURE_OUTPUT_ALLOWED_TRIES` is 1, so a rejected parse is a dead
+sample rather than a retry. Two failure modes, both new, both on ~half of every
+round:
+
+* any obedient value above 1 raises, and because all five samples share one
+  prompt and one model the error is correlated — closer to forfeiting the
+  question than to losing one sample in five;
+* a 1% forecast parsed as `1` is coerced by the validator to 0.999 and then
+  clamped by our own caps to 0.98. **A 1% belief published at 98%**, silently,
+  with a single warning line in a four-month log.
+
+Upstream deliberately passed *no* instructions here and let the field name do the
+work. The fix names the unit the schema wants and gives the conversion. Four
+tests now cover it, including one asserting the old wording is absent.
+
+**Serious — "Parse exactly one" is a trap on multiple choice.** On binary and
+numeric the answer is one value; on multiple choice it is a list of N, and the
+guard sat two lines above "Every option above must appear in your final list."
+The wording is now "use only the LAST complete final answer, and use it IN
+FULL". More importantly the *code* now checks it: a parsed option set that does
+not match the question's options raises, so a truncated list costs a **sample**.
+It previously cost the **question**, because
+`MultipleChoiceReport.aggregate_predictions` raises on mismatched option names
+outside the per-sample gather — the same failure already closed on the numeric
+path by forcing `get_cdf()` per sample. The check is wrapped so that a future
+library rename degrades to the old behaviour rather than raising on every sample
+of every multiple-choice question for four unattended months.
+
+**Also fixed from the same audit:** an empty scoring-grid message left an orphan
+`- ` bullet with the line below it pointing at a grid that was not there (the
+message now carries its own bullet and the bullet below is self-contained); the
+date parser gained the numeric path's "final block only" scoping; the numeric
+flag now also matches a hyphenated `FIGURE-AMBIGUITY`; the `(i)`/`(ii)` list no
+longer collides with the `(a)`–`(h)` list below it; one vacuous test was replaced
+with a real one; and a comment claiming the guards' indentation was load-bearing
+was corrected — `clean_indents` takes the deeper of the first two lines' indents
+and lstrips anything shallower, so it is readability only.
+
+**Known and accepted:** the numeric prompt now states the still-open convention
+twice, once in the labelled criteria sentence and once in the guard. That is
+reinforcement of the single convention a bot maker publicly measured at 90 peer
+points, and it is left deliberately.
+
+### 6. The second audit found a bot that did nothing at all
+
+**This is the most serious defect this project has produced, and it was already
+committed.** It is recorded here in full because that is what this file is for.
+
+The scoring-grid helper added earlier today was inserted into `main.py` by
+anchoring on the line `    parser = argparse.ArgumentParser(`. That line sits
+**inside** the `if __name__ == "__main__":` suite. Inserting a column-zero `def`
+above it ended the suite. Everything from `argparse` to the end of the file —
+`check_environment`, the startup banner, the `MetaculusClient`, the bot itself,
+the tournament dispatch, the step summary, every `raise SystemExit` — became
+unreachable code sitting in the helper's body, after its `return` statements.
+
+`python main.py` would have configured logging and **exited zero**. A green tick
+every ten minutes for four months and not one forecast: precisely the "a green
+tick here would be a lie" failure this codebase is built to prevent, in code that
+could no longer run.
+
+**Nothing caught it.** The patch matched `main.py` byte for byte. The rebuild
+diff was clean. All 255 checks passed, because `load()` lifts individual function
+nodes and `exec`s them, so dead code compiles perfectly and is never inspected.
+The test suite had grown to 255 checks over a bot that did nothing.
+
+**No live run was affected.** The workflow has been disabled since 20 September,
+so the broken build was never executed.
+
+The helper is now anchored on a column-zero line. Six new checks read the
+module's AST directly: the `__main__` guard must be found exactly once, must run
+to the last line of the file, must be the last node, and must still contain
+`argparse`, `check_environment`, `MetaculusClient`, `forecast_on_tournament`,
+`write_step_summary` and a `raise SystemExit`.
+
+The same pass also found, and this batch fixes:
+
+* **The multiple-choice check compared sets.** `[A, A, B, C]` against `[A, B, C]`
+  passed, and the library's separate *length* check then raised outside the
+  gather — and if the duplicating sample happened to be `predictions[0]`, every
+  good sample failed against it. It is now a sorted-list comparison in a
+  module-level helper, and both sides are read inside the same `try` so a library
+  rename degrades to silence rather than raising on every sample.
+* **The scoring grid lied on log-scaled questions.** `width = range / bins`
+  assumes a uniform grid; when `zero_point` is set the bins are geometric. On a
+  1–1000 log question the helper stated 4.995 where the true widths ran from
+  0.035 to 33.95 — a wrong number feeding the one input the concentrate-or-smooth
+  decision rests on. It now says nothing at all on those questions.
+* **The bin count was off by one.** `cdf_size` counts CDF *points*; the bins are
+  the gaps between them. A 201-point grid is 200 bins. The width was always
+  right; only the stated count was wrong.
+* **Two tests were passing over dead features.** A mutation test turned the
+  multiple-choice `raise` into a `logger.warning` and neutered the binary
+  parsing instruction to `additional_instructions=None`; the suite stayed green
+  both times, because both checks only grepped the source. The guards check now
+  pins the argument's *value*, and the option check is lifted and **executed**
+  against correct, truncated, extra, duplicated and renamed option lists. Seven
+  mutations were run against the finished batch and all seven were caught.
+
+### 7. Passes three and four: the same bullet, wrong twice more
+
+The batch was audited four times. Each pass found something the one before it
+had introduced, which is the honest reason for reporting all four.
+
+**Third pass — the escape hatch reopened the blocker it was written to close.**
+Fixing the binary parser meant telling it to divide by a hundred; a bullet was
+then added so it would not divide an *already*-decimal answer twice. It read "if
+the text already states its final answer as a value between 0 and 1, use that
+value unchanged". `1%` and `0.5%` are values between 0 and 1. The bullet meant to
+protect the fix reopened the 1%-published-at-98% inversion on exactly the
+forecasts where it does most damage.
+
+**Fourth pass — the rewrite still let one input through.** The second version
+keyed on the percent sign instead of the size. A model that drops the sign and
+writes `Probability: 1` still satisfied it: the library's validator maps exactly
+`1` to 0.999 rather than raising, and our caps then publish 0.98. The bullet is
+now bounded to decimals *below* 1 and spells out the two bare cases — 73 is 0.73,
+1 is 0.01.
+
+Also from those two passes: the `FIGURE AMBIGUITY` telemetry moved above the
+parse, because a parser that raises kills the sample before the log line runs and
+the log went quiet on exactly the samples worth reading; the flag reader is now
+wrapped, since telemetry must never kill a forecast; the multiple-choice and date
+prompts got the labelled criteria sentence, because edit 27's evidence was never
+numeric-specific; and the option guard now says so in the log when it cannot read
+a question's options, rather than opting out in silence.
+
+**Nineteen deliberate mutations** were run across the whole batch. Six survived
+the third pass and three the fourth — every one a case where a check asserted
+that a line *existed* without asserting what it *said*, so reversing its meaning
+stayed green. Reversing "the LAST complete final answer" to "FIRST" — the entire
+point of the ported guard — passed 276 checks. All surviving mutations are now
+caught.
+
+### Verification
+
+The upstream template was reconstructed locally and confirmed byte-identical
+through the existing patch, so this batch was checked with the **real**
+rebuild-and-diff rather than the residue heuristic that stands in for it when
+upstream is absent. 35 patch edits apply cleanly; `main.py` is byte-identical to
+the patch output; **298 checks pass, up from 197**; and nineteen deliberate mutations of today's changes are each caught by them. Nothing here has been run
+against a live question yet.
+
 ## 2026-09-21 (same day, second pass) — RETRACTION, and the numeric prompt catches up
 
 **The entry below is wrong and this one supersedes it.** It is left in place

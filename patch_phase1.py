@@ -207,6 +207,35 @@ replace(
     return BINARY_FLOOR, BINARY_CEILING
 
 
+def _figure_ambiguity_flag(reasoning: str):
+    """Return "HIGH", "LOW" or None for the numeric prompt's FIGURE AMBIGUITY flag.
+
+    TELEMETRY ONLY. Nothing downstream acts on the return value. It exists
+    because the numeric prompt asks for the flag and, until 21 Sept 2026, no
+    line of the run log ever mentioned whether one came back — so there was no
+    way to tell a model that was doing the adversarial read from one that was
+    silently skipping it. On binary the equivalent flag is ENFORCED by
+    caps_for_reasoning(); here it is advisory, and the honest way to say so is
+    to log it rather than pretend it did something.
+
+    The literal is FIGURE AMBIGUITY, not AMBIGUITY, so the two flags cannot be
+    confused in a log or matched by each other's pattern: caps_for_reasoning
+    anchors its line at AMBIGUITY and will not match a line beginning FIGURE.
+
+    Same decoration tolerance and same last-match-wins rule as the binary flag,
+    for the same reasons. Every backslash below is doubled in patch_phase1.py.
+    """
+    try:
+        flags = re.findall(
+            r"^[ \\t\\r>#*_-]*FIGURE[ \\t\\r*_-]+AMBIGUITY[ \\t\\r*_]*:[ \\t\\r*_]*(HIGH|LOW)[ \\t\\r*_.!:]*$",
+            reasoning or "",
+            re.IGNORECASE | re.MULTILINE,
+        )
+    except Exception:  # telemetry must never kill a forecast
+        return None
+    return flags[-1].upper() if flags else None
+
+
 def _sorted_percentiles(percentile_list):
     """Sort percentiles by declared percentile; REJECT a non-monotonic sample.
 
@@ -469,6 +498,20 @@ replace(
         # rejection needs roughly six or more literal zeros AND a concentrated
         # forecast, not merely a wide option list as first claimed.
 
+        # FAIL A SHORT OPTION LIST AS A SAMPLE, NOT AS THE QUESTION. Nothing
+        # here checked that the parser returned every option. A truncated list
+        # passes PredictedOptionList's validator happily — one option at 1.0
+        # clamps to 0.99 and sums to 1 — and then raises in
+        # MultipleChoiceReport.aggregate_predictions ("All predictions must
+        # have the same option names"), which runs OUTSIDE the per-sample
+        # gather. One bad sample would forfeit the whole question even when the
+        # other four were perfect. Exactly the failure already closed on the
+        # numeric path by forcing get_cdf() per sample. Audit, 21 Sept 2026.
+        #
+        # See _reject_mismatched_options for why this is a sorted LIST
+        # comparison and why both sides are read inside its try.
+        _reject_mismatched_options(predicted_option_list, question)
+
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}."
         )
@@ -595,8 +638,8 @@ replace(
 replace(
     "            - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.",
     "            - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.\n"
-    "            - {grid_message}\n"
-    "            - CONCENTRATING PROBABILITY. Only when the scoring bins above are FINER than the grid the resolution source publishes on is it worth concentrating. For example, if the source reports whole numbers but each bin covers a fraction of one, place a close pair of percentiles either side of the one or two values you think most likely (such as 41.99 and 42.01) so the probability lands in the bins that can actually occur. Keep the values strictly increasing.\n"
+    "            {grid_message}\n"
+    "            - CONCENTRATING PROBABILITY. Only when this question's scoring bins are FINER than the grid the resolution source publishes on is it worth concentrating. For example, if the source reports whole numbers but each bin covers a fraction of one, place a close pair of percentiles either side of the one or two values you think most likely (such as 41.99 and 42.01) so the probability lands in the bins that can actually occur. Keep the values strictly increasing.\n"
     "            - Never concentrate on more than two values, and never spend percentiles 10 and 90 on it \u2014 those stay ordinary wide tail values. A distribution that spends all six percentiles on spikes has no tails left, which loses far more when the answer falls outside them than the spikes gain when it does not. If the bins are as wide as the published grid or wider, do none of this: forecast smoothly.",
     "integer-valued numeric questions: keep the mass on achievable values",
 )
@@ -618,6 +661,79 @@ replace(
     "            - Preserve the values exactly as written, including small decimal offsets such as 0.99 or 1.01. Do NOT round them to whole numbers.\n"
     "            - Parse ONLY the final \"Percentile NN: value\" block. Ignore every other number in the text, including base rates, reference-class figures, scoring-grid widths and interpretation notes.",
     "numeric parser: preserve small decimal offsets, do not round",
+)
+
+# ---------------------------------------------------------------------------
+# 24. THE GUARD HAS TO COME FIRST, AND THE FLAG NEEDS ITS OWN NAME  (21 Sept 2026)
+#
+#     Edit 22 anchored the still-open guard and the adversarial criteria read on
+#     the upstream "Before answering you write:" block. Edit 20 had already
+#     inserted four formatting bullets ABOVE that point, so the built prompt read
+#     "FIRST, before anything else..." in NINTH position, after a page of
+#     instructions about scientific notation and bin widths. An instruction that
+#     says "first" and arrives ninth is not merely untidy - it is a direct
+#     contradiction, and the model resolves it by ignoring one half.
+#
+#     So the guard is anchored here instead, on upstream text that sits BEFORE
+#     the formatting block, and edit 22 keeps only the lettered list. Nothing in
+#     the wording changed except the flag's name.
+#
+#     THE NAME. The numeric flag reused the binary literal, AMBIGUITY, which is
+#     the string caps_for_reasoning() matches to clamp a binary probability to
+#     [0.10, 0.90]. Two different meanings behind one token in one codebase is a
+#     trap for whoever reads it next, and it made the numeric flag impossible to
+#     grep for. It is now FIGURE AMBIGUITY - accurate, since on a numeric
+#     question the ambiguity is about WHICH PUBLISHED FIGURE is being asked for -
+#     and caps_for_reasoning cannot match it, because its pattern anchors the
+#     line at AMBIGUITY and a line beginning FIGURE fails the anchor.
+#
+#     It is also now LOGGED (see _figure_ambiguity_flag). It remains ADVISORY:
+#     the model is asked to widen its own interval and nothing enforces it.
+# ---------------------------------------------------------------------------
+replace(
+    """            {lower_bound_message}
+            {upper_bound_message}
+
+            Formatting Instructions:
+            - Please notice the units requested and give your answer in these units (e.g. whether you represent a number as 1,000,000 or 1 million).""",
+    """            {lower_bound_message}
+            {upper_bound_message}
+
+            This question is STILL OPEN and has NOT yet resolved. If your research
+            appears to show the figure is already settled, treat that as a warning
+            sign rather than a conclusion: re-read the resolution criteria and the
+            resolution date, and check whether the number you have found is really
+            the one being asked for. A figure that resembles the answer, from a
+            different source or a different date, is not the answer.
+
+            FIRST, before anything else, read the resolution criteria adversarially.
+            You are forecasting a specific published number, not the general topic.
+            Which source publishes it, as of which date, in which units, rounded
+            how, and cumulative or per-period - each of those changes the answer,
+            and a forecaster who gets the world right and the definition wrong
+            loses anyway.
+
+            Write:
+            1. The strictest reasonable reading of the resolution criteria,
+               stated as a precise test: which published figure, from which
+               source, as of which date, in which units.
+            2. Any OTHER reading a careful person might take. If a different
+               reading would produce a materially different number, say so.
+
+            Then, on its own line, exactly one of:
+            FIGURE AMBIGUITY: LOW
+            FIGURE AMBIGUITY: HIGH
+            Use HIGH only when competing readings would genuinely produce
+            different numbers - not merely because the future is uncertain.
+            Uncertainty about the world is normal and belongs in the spread of
+            your distribution. Uncertainty about WHICH QUANTITY is being asked for
+            is different: if you write HIGH, widen your 10 to 90 interval
+            materially, because you are not entitled to a sharp distribution when
+            you are unsure what is being measured.
+
+            Formatting Instructions:
+            - Please notice the units requested and give your answer in these units (e.g. whether you represent a number as 1,000,000 or 1 million).""",
+    "numeric prompt: still-open guard and adversarial read, ABOVE the formatting bullets",
 )
 
 # ---------------------------------------------------------------------------
@@ -670,39 +786,7 @@ replace(
             The last thing you write is your final answer as:
             "
             Percentile 10: XX (lowest number value)""",
-    """            This question is STILL OPEN and has NOT yet resolved. If your research
-            appears to show the figure is already settled, treat that as a warning
-            sign rather than a conclusion: re-read the resolution criteria and the
-            resolution date, and check whether the number you have found is really
-            the one being asked for. A figure that resembles the answer, from a
-            different source or a different date, is not the answer.
-
-            FIRST, before anything else, read the resolution criteria adversarially.
-            You are forecasting a specific published number, not the general topic.
-            Which source publishes it, as of which date, in which units, rounded
-            how, and cumulative or per-period - each of those changes the answer,
-            and a forecaster who gets the world right and the definition wrong
-            loses anyway.
-
-            Write:
-            (i)  The strictest reasonable reading of the resolution criteria,
-                 stated as a precise test: which published figure, from which
-                 source, as of which date, in which units.
-            (ii) Any OTHER reading a careful person might take. If a different
-                 reading would produce a materially different number, say so.
-
-            Then, on its own line, exactly one of:
-            AMBIGUITY: LOW
-            AMBIGUITY: HIGH
-            Use HIGH only when competing readings would genuinely produce
-            different numbers - not merely because the future is uncertain.
-            Uncertainty about the world is normal and belongs in the spread of
-            your distribution. Uncertainty about WHICH QUANTITY is being asked for
-            is different: if you write HIGH, widen your 10 to 90 interval
-            materially, because you are not entitled to a sharp distribution when
-            you are unsure what is being measured.
-
-            Before answering you write:
+    """            Before answering you write:
             (a) The time left until the outcome to the question is known.
             (b) The base rate or reference class: how this quantity has behaved
                 over comparable past periods. State the numbers behind it and
@@ -778,7 +862,7 @@ replace(
 )
 
 replace(
-    """    parser = argparse.ArgumentParser(""",
+    """def caps_for_reasoning(reasoning: str) -> tuple[float, float]:""",
     """def _scoring_grid_message(question) -> str:
     \"\"\"Describe the scoring grid so the model can judge when to concentrate.
 
@@ -800,16 +884,31 @@ replace(
     prompt simply omits the line. An advisory line is not worth a dead sample.
     \"\"\"
     try:
-        bins = getattr(question, "cdf_size", None) or 0
+        # A log-scaled question has no single bin width. Metaculus maps CDF
+        # position to value geometrically when zero_point is set, so the bins
+        # at the bottom of the range can be a hundred times narrower than the
+        # ones at the top, and any single figure stated here would be a lie -
+        # feeding the one input the concentrate-or-smooth decision rests on.
+        # Measured on a 1-1000 log question: stated 4.995, true range 0.035 to
+        # 33.95. Silence is correct. Second audit pass, 21 Sept 2026.
+        if getattr(question, "zero_point", None) is not None:
+            return ""
+        cdf_size = getattr(question, "cdf_size", None) or 0
         lower = question.lower_bound
         upper = question.upper_bound
-        if not bins or bins < 2 or upper is None or lower is None:
+        if not cdf_size or cdf_size < 2 or upper is None or lower is None:
             return ""
-        width = (upper - lower) / (bins - 1)
+        # cdf_size is the number of CDF POINTS, which is one more than the
+        # number of bins between them. Calling a 201-point grid "201 bins"
+        # overstates it by one; the width was always right.
+        bins = cdf_size - 1
+        width = (upper - lower) / bins
         if width <= 0:
             return ""
+        # The leading "- " belongs to the MESSAGE, not the prompt, so that an
+        # empty return leaves no orphan bullet behind. Audit, 21 Sept 2026.
         return (
-            f"This question is scored over {bins} bins, each about {width:.4g} "
+            f"- This question is scored over {bins} bins, each about {width:.4g} "
             "wide. Concentrating probability on particular values only helps if "
             "those bins are FINER than the grid the resolution source itself "
             "publishes on. If the source reports whole numbers and a bin is a "
@@ -821,8 +920,292 @@ replace(
         return ""
 
 
-    parser = argparse.ArgumentParser(""",
-    "a helper that states the scoring grid, failing silently to nothing",
+def _reject_mismatched_options(predicted_option_list, question) -> None:
+    \"\"\"Raise unless the parser returned exactly the question's options.
+
+    FAIL A BAD OPTION LIST AS A SAMPLE, NOT AS THE QUESTION. Nothing checked
+    this. A truncated or duplicated list passes PredictedOptionList's own
+    validator happily - one option at 1.0 clamps to 0.99 and sums to 1 - and
+    then raises in MultipleChoiceReport.aggregate_predictions, which runs
+    OUTSIDE the per-sample gather. One bad sample forfeited the whole question
+    even when the other four were perfect. Exactly the failure already closed on
+    the numeric path by forcing get_cdf() per sample. Audit, 21 Sept 2026.
+
+    Compares SORTED LISTS, not sets. A set comparison passes [A, A, B, C]
+    against [A, B, C], and the library's separate length check then raises
+    outside the gather - worse still, if the duplicating sample happens to be
+    predictions[0] it sets the expected length and every GOOD sample fails.
+    Found by the second audit pass, which is why this is a list.
+
+    Not over-strict: publish_report_to_metaculus posts option_name verbatim as
+    the Metaculus payload key, so a name that differs from question.options in
+    any way could never have published. Every case rejected here was already
+    lost; it is now lost one sample at a time instead of a question at a time.
+
+    Degrades to silence, never to noise: if the library renames either
+    attribute this must go back to the old behaviour rather than raise on every
+    sample of every multiple-choice question for four unattended months. Both
+    sides of the comparison are read inside the try for that reason.
+    \"\"\"
+    try:
+        parsed = sorted(
+            option.option_name
+            for option in predicted_option_list.predicted_options
+        )
+        expected = sorted(question.options)
+    except Exception:
+        logger.warning(
+            "Option guard could not read this question's options - skipping it. "
+            "If this appears on every multiple-choice question, the library has "
+            "renamed a field and the guard is no longer protecting anything."
+        )
+        return
+    if parsed != expected:
+        raise ValueError(
+            f"Parser returned {parsed} but the question asks for {expected} "
+            "- rejecting this sample."
+        )
+
+
+def caps_for_reasoning(reasoning: str) -> tuple[float, float]:""",
+    "two module-level helpers, ABOVE the __main__ block",
+)
+
+# ---------------------------------------------------------------------------
+# 25. PARSER GUARDS PORTED BY HAND FROM forecasting-tools v0.3.0  (21 Sept 2026)
+#
+#     v0.3.0 (released 7 Sept) added two guards to ITS copy of the template:
+#     _create_resolved_question_parsing_message and
+#     _create_single_distribution_parsing_message. Bumping the dependency
+#     delivers NEITHER, because this file vendors its own SummerTemplateBot2026
+#     and every parse call below is ours. Verified against the pinned 0.2.92 and
+#     the 0.3.0 source. So they are ported by hand.
+#
+#     Condensed to two bullets and shared by all four parse paths. The binary
+#     path had no parsing instructions at all until now.
+# ---------------------------------------------------------------------------
+replace(
+    """    ##################################### RESEARCH #####################################
+
+    async def run_research(self, question: MetaculusQuestion) -> str:""",
+    """    # -------------------------------------------------------------------
+    # PARSER GUARDS (see edit 25 in patch_phase1.py for provenance).
+    #
+    # Guard one. The parser is a cheaper model reading a long reasoning text.
+    # If the forecaster discusses a figure as though the matter were settled,
+    # the parser can lift that figure instead of the forecast. Every FutureEval
+    # question is open at forecast time, so a "known outcome" in the text is
+    # always the forecaster's framing and never a resolution.
+    #
+    # Guard two. Drafts, worked examples and sensitivity checks all look like
+    # final answers. Merging two of them produces a forecast nobody wrote, and
+    # averaging them produces one nobody would defend. Last complete answer
+    # wins, which is also how caps_for_reasoning reads the binary flag.
+    #
+    # Written as long single lines to match the bullet style of the blocks they
+    # join. The twelve-space continuation indent is for READABILITY of the
+    # rendered prompt only - it is not load-bearing. clean_indents() is not
+    # textwrap.dedent: it takes the deeper of the first two lines' indents and
+    # lstrips anything shallower, so a flush-left line cannot poison the dedent
+    # of the surrounding prompt. Checked against the library, 21 Sept 2026.
+    # -------------------------------------------------------------------
+    _PARSER_GUARDS = (
+        '- The question is STILL OPEN and has NOT resolved. The text may discuss a figure or an event as though the matter were already settled; that is the forecaster weighing evidence, not a resolution. Parse the forecast the text actually gives. Never parse a value the text presents as an already-known outcome, and never supply one yourself.\\n'
+        '            - The text may contain MORE THAN ONE candidate answer: an early draft, a worked example, a sensitivity check, or the instruction restated. Use only the LAST complete final answer in the text, and use it IN FULL. Never merge two candidate answers and never average them.'
+    )
+
+    ##################################### RESEARCH #####################################
+
+    async def run_research(self, question: MetaculusQuestion) -> str:""",
+    "parser guards: the shared constant",
+)
+
+replace(
+    "            - Turn any values that are in scientific notation into regular numbers.",
+    "            - Turn any values that are in scientific notation into regular numbers.\n"
+    "            {self._PARSER_GUARDS}",
+    "parser guards: numeric path",
+)
+
+replace(
+    "            - The output is given as dates/times please format it into a valid datetime parsable string. Assume midnight UTC if no hour is given.",
+    "            - The output is given as dates/times please format it into a valid datetime parsable string. Assume midnight UTC if no hour is given.\n"
+    "            - Parse ONLY the final \"Percentile NN: YYYY-MM-DD\" block. Ignore every other date in the text, including reference-class dates and interpretation notes.\n"
+    "            {self._PARSER_GUARDS}",
+    "parser guards: date path",
+)
+
+replace(
+    '            The text you are parsing may prepend these options with some variation of "Option" which you should remove if not part of the option names I just gave you.',
+    '            The text you are parsing may prepend these options with some variation of "Option" which you should remove if not part of the option names I just gave you.\n'
+    '            {self._PARSER_GUARDS}',
+    "parser guards: multiple-choice path",
+)
+
+# ---------------------------------------------------------------------------
+# 26. THE BINARY PATH GETS PARSING INSTRUCTIONS AT ALL  (21 Sept 2026)
+#
+#     Binary was the one path calling structure_output with no
+#     additional_instructions whatsoever. The parser was handed a page of
+#     reasoning and the bare BinaryPrediction schema, and left to work out which
+#     of the several percentages in the text was the answer. It has been getting
+#     that right, but on inference alone.
+#
+#     Binary is roughly half of every round and it is the path where the caps
+#     live, so a parser that lifts the wrong percentage produces a confident
+#     wrong number rather than a failed sample. Two bullets and the shared
+#     guards close it.
+# ---------------------------------------------------------------------------
+replace(
+    """    async def _binary_prompt_to_forecast(
+        self,
+        question: BinaryQuestion,
+        prompt: str,
+    ) -> ReasonedPrediction[float]:""",
+    """    async def _binary_prompt_to_forecast(
+        self,
+        question: BinaryQuestion,
+        prompt: str,
+    ) -> ReasonedPrediction[float]:
+        parsing_instructions = clean_indents(
+            f\"\"\"
+            The text given to you is a forecast of the probability that a binary question resolves YES.
+            - This text is trying to answer the question: "{question.question_text}".
+            - The text states its answer as a PERCENTAGE, for example "Probability: 73%". The field you are filling, prediction_in_decimal, is a DECIMAL BETWEEN 0 AND 1. Divide by one hundred: 73% becomes 0.73, 4% becomes 0.04, 99% becomes 0.99. A value above 1 in that field is always wrong and will be rejected.
+            - Take the percentage the text gives as its FINAL answer. Ignore every other percentage in the text, including base rates, reference-class figures and the probabilities inside scenarios.
+            - If the text writes its final answer WITHOUT a percent sign as a decimal below 1, such as "Probability: 0.73", use that value unchanged. A bare number of 1 or more is on the 0-100 scale: "Probability: 73" is 0.73, and "Probability: 1" is 0.01. A number followed by "%" is ALWAYS a percentage however small it is: 1% is 0.01, and 0.5% is 0.005. Never read "1%" as 1.
+            {self._PARSER_GUARDS}
+            \"\"\"
+        )""",
+    "binary path: build parsing instructions",
+)
+
+replace(
+    """            BinaryPrediction,
+            model=self.get_llm("parser", "llm"),
+            num_validation_samples=self._structure_output_validation_samples,
+        )""",
+    """            BinaryPrediction,
+            model=self.get_llm("parser", "llm"),
+            additional_instructions=parsing_instructions,
+            num_validation_samples=self._structure_output_validation_samples,
+        )""",
+    "binary path: wire the parsing instructions in",
+)
+
+# ---------------------------------------------------------------------------
+# 27. LABEL THE RESOLUTION CRITERIA ON THE NUMERIC PROMPT  (21 Sept 2026)
+#
+#     The binary prompt introduces the criteria with a sentence that does two
+#     jobs: it says what the block IS, and it states the convention that the
+#     criteria have not yet been satisfied. The numeric prompt dropped the
+#     criteria in as an unlabelled block between the background and the fine
+#     print, so the model had to infer what it was reading.
+#
+#     That matters more here than on binary, because edit 24 then asks for a
+#     strict reading of a block the prompt never named. The Spring advice
+#     notebook prices the missing convention directly: bot maker #45 reported
+#     losing 90 peer points for not telling the model to assume the event has
+#     not happened yet.
+#
+#     Same sentence as binary, verbatim, so the two prompts cannot drift.
+# ---------------------------------------------------------------------------
+replace(
+    """            Background:
+            {question.background_info}
+
+            {question.resolution_criteria}
+
+            {question.fine_print}
+
+            Units for answer:""",
+    """            Background:
+            {question.background_info}
+
+            This question's outcome will be determined by the specific criteria below. These criteria have not yet been satisfied:
+            {question.resolution_criteria}
+
+            {question.fine_print}
+
+            Units for answer:""",
+    "numeric prompt: label the resolution criteria",
+)
+
+# ---------------------------------------------------------------------------
+# 28. LOG THE FLAG BEFORE THE PARSE, NOT AFTER IT  (third audit pass, 21 Sept)
+#
+#     The FIGURE AMBIGUITY telemetry sat after _structure_output_paced. A parser
+#     that raises kills the sample before the log line is reached, so the log
+#     went quiet on exactly the samples worth inspecting. It belongs immediately
+#     after the reasoning arrives, where nothing can come between them.
+# ---------------------------------------------------------------------------
+replace(
+    """        parsing_instructions = clean_indents(
+            f\"\"\"
+            The text given to you is trying to give a forecast distribution for a numeric question.""",
+    """        logger.info(
+            "FIGURE AMBIGUITY on %s: %s",
+            question.page_url,
+            _figure_ambiguity_flag(reasoning) or "not declared",
+        )
+        parsing_instructions = clean_indents(
+            f\"\"\"
+            The text given to you is trying to give a forecast distribution for a numeric question.""",
+    "numeric path: log the ambiguity flag before a parse failure can hide it",
+)
+
+# ---------------------------------------------------------------------------
+# 29. THE CRITERIA LABEL BELONGS ON EVERY PATH  (third audit pass, 21 Sept 2026)
+#
+#     Edit 27 gave the numeric prompt binary's labelled criteria sentence and
+#     justified it with evidence that applies to all four question types - bot
+#     maker #45 losing 90 peer points for not stating the "assume it has not
+#     happened yet" convention. Multiple choice and date were left with an
+#     unlabelled block, so the rationale stopped one path short of its own
+#     conclusion. Same sentence, verbatim, on both.
+# ---------------------------------------------------------------------------
+replace(
+    """            Background:
+            {question.background_info}
+
+            {question.resolution_criteria}
+
+            {question.fine_print}
+
+
+            Your research assistant says:""",
+    """            Background:
+            {question.background_info}
+
+            This question's outcome will be determined by the specific criteria below. These criteria have not yet been satisfied:
+            {question.resolution_criteria}
+
+            {question.fine_print}
+
+
+            Your research assistant says:""",
+    "multiple-choice prompt: label the resolution criteria",
+)
+
+replace(
+    """            Background:
+            {question.background_info}
+
+            {question.resolution_criteria}
+
+            {question.fine_print}
+
+            Your research assistant says:""",
+    """            Background:
+            {question.background_info}
+
+            This question's outcome will be determined by the specific criteria below. These criteria have not yet been satisfied:
+            {question.resolution_criteria}
+
+            {question.fine_print}
+
+            Your research assistant says:""",
+    "date prompt: label the resolution criteria",
 )
 
 DST.write_text(text, encoding="utf-8")

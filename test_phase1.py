@@ -405,6 +405,33 @@ def run():
     orphans = sorted({m for m in OURS if m in residue})
     check("no edit in main.py lacks a patch entry", orphans, [])
 
+    print("\n  -- the file's MODULE STRUCTURE, which nothing checked --")
+    # THE BUG THIS EXISTS FOR (second audit pass, 21 Sept 2026). The scoring-grid
+    # helper was anchored on "    parser = argparse.ArgumentParser(" — a line
+    # INSIDE the `if __name__ == "__main__":` suite. Inserting a column-0 `def`
+    # above it terminated the suite, and every line from argparse to EOF became
+    # unreachable code inside the helper, after its returns.
+    #
+    # The bot would have started, configured logging, and exited 0. A green tick
+    # every ten minutes for four months and not one forecast — the exact "green
+    # tick would be a lie" failure this file guards against, in code that could
+    # never run. NOTHING caught it: the patch/main diff agreed, the rebuild was
+    # byte-identical, and load() execs individual function nodes so dead code
+    # compiles perfectly. 255 checks passed over a bot that does nothing.
+    _tree = ast.parse(src)
+    _main = [b for b in _tree.body
+             if isinstance(b, ast.If) and "__main__" in ast.dump(b.test)]
+    check("the __main__ guard is found exactly once", len(_main), 1)
+    check("the __main__ block runs to the last line of the file",
+          _main[0].end_lineno, len(src.splitlines()))
+    check("nothing is defined after it",
+          _tree.body[-1] is _main[0], True)
+    # The things that must be INSIDE it, not stranded in a helper's dead tail.
+    _mainsrc = "\n".join(src.splitlines()[_main[0].lineno - 1:_main[0].end_lineno])
+    for _needed in ("argparse.ArgumentParser(", "check_environment(", "MetaculusClient(",
+                    "forecast_on_tournament(", "write_step_summary(", "raise SystemExit("):
+        check(f"the __main__ block still contains {_needed}", _needed in _mainsrc, True)
+
     print("\n  -- the exit path is reachable --")
     # log_report_summary defaults to raise_errors=True and raises on ANY failed
     # question, which made everything after it — the banner and the season
@@ -940,9 +967,16 @@ def run():
     _numstart = src.index("async def _run_forecast_on_numeric")
     _datstart = src.index("async def _run_forecast_on_date")
     _binstart = src.index("async def _run_forecast_on_binary")
+    # Spans keyed on markers, never on a character count: the binary span used
+    # to be _binstart + 6000 with 888 characters of headroom, so it would have
+    # stopped covering the prompt without failing. Second audit, 21 Sept 2026.
     for _label, _span in (
         ("numeric", src[_numstart:_datstart]),
-        ("binary", src[_binstart:_binstart + 6000]),
+        ("binary", src[_binstart:src.index("##################################### MULTIPLE CHOICE")]),
+        ("multiple choice", src[src.index("async def _multiple_choice_prompt_to_forecast"):
+                                src.index("##################################### NUMERIC")]),
+        ("date", src[src.index("async def _date_prompt_to_forecast"):
+                     src.index("def _create_upper_and_lower_bound_messages")]),
     ):
         check(f"no literal backslash-n leaked into the {_label} prompt",
               "\\n" in _span, False)
@@ -953,8 +987,23 @@ def run():
         def __init__(self, **kw): self.__dict__.update(kw)
     check("a normal question yields a grid line",
           "scored over" in grid(_Q(cdf_size=201, lower_bound=0, upper_bound=100)), True)
-    check("a discrete question reports its wide bins",
-          "1" in grid(_Q(cdf_size=5, lower_bound=-0.5, upper_bound=4.5)), True)
+    # cdf_size counts CDF POINTS; the bins are the gaps between them, one
+    # fewer. A discrete question like q45541 (-0.5 to 4.5, five unit bins)
+    # arrives as six points, and the message must say five bins of width 1.
+    _disc = grid(_Q(cdf_size=6, lower_bound=-0.5, upper_bound=4.5))
+    check("a discrete question reports five bins, not six", "5 bins" in _disc, True)
+    check("...each one wide", "about 1 wide" in _disc, True)
+    # Four significant figures. A coarser format would round a 0.205-wide bin
+    # to 0.2 and a 1.0004 to 1, which is the difference the concentrate-or-
+    # smooth decision turns on. Mutation survivor, third audit pass.
+    check("the width is stated to four significant figures",
+          "{width:.4g}" in src, True)
+    check("a 201-point grid is 200 bins",
+          "200 bins" in grid(_Q(cdf_size=201, lower_bound=0, upper_bound=100)), True)
+    # A log-scaled question has NO single bin width — the bins are geometric.
+    # Stating one would feed a lie to the concentrate-or-smooth decision.
+    check("a log-scaled question says nothing at all",
+          grid(_Q(cdf_size=201, lower_bound=1, upper_bound=1000, zero_point=0)), "")
     for _bad in (_Q(cdf_size=None, lower_bound=0, upper_bound=1),
                  _Q(cdf_size=1, lower_bound=0, upper_bound=1),
                  _Q(cdf_size=201, lower_bound=5, upper_bound=5),
@@ -965,6 +1014,8 @@ def run():
 
     # Edit 22 put base rates and reference-class figures upstream of a
     # single-shot parser. It must be told to ignore them.
+    check("the numeric parser is told not to round the straddle away",
+          "Preserve the values exactly as written, including small decimal offsets" in src, True)
     check("the parser is scoped to the final percentile block",
           'Parse ONLY the final "Percentile NN: value" block' in src, True)
     check("...and item (f) keys on the published grid, not whole-number-ness",
@@ -976,6 +1027,285 @@ def run():
           bool(_re.search(r"sum to\s+exactly 1\.00", src)), True)
     check("the old 0%-option instruction is gone",
           "make it an entry in your final list with 0% probability" in src, False)
+
+    print("\n  -- the guard arrives FIRST, and the flag has its own name --")
+    # Edit 22 anchored the still-open guard and the adversarial read on the
+    # upstream "Before answering you write:" block. Edit 20 had already inserted
+    # four formatting bullets ABOVE that point, so the built prompt said "FIRST,
+    # before anything else" in NINTH position. An instruction that says first and
+    # arrives ninth is a contradiction, and the model resolves it by ignoring one
+    # half. Edit 24 re-anchors it. Audit, 21 Sept 2026.
+    check("the still-open guard precedes the formatting bullets",
+          numeric_prompt.index("STILL OPEN and has NOT yet resolved")
+          < numeric_prompt.index("Formatting Instructions:"), True)
+    check("...and so does the adversarial read",
+          numeric_prompt.index("FIRST, before anything else")
+          < numeric_prompt.index("Formatting Instructions:"), True)
+    check("...and the base-rate list still comes after them",
+          numeric_prompt.index("Formatting Instructions:")
+          < numeric_prompt.index("base rate or reference class"), True)
+
+    # Moving a block is exactly where a stray duplicate creeps in. One did, on
+    # the first build of edit 24: the bound messages were emitted twice because
+    # the replacement re-stated its own anchor. Caught here, before the commit.
+    check("the bound messages appear exactly once",
+          (numeric_prompt.count("{lower_bound_message}"),
+           numeric_prompt.count("{upper_bound_message}")), (1, 1))
+    check("...and so does the formatting block",
+          numeric_prompt.count("Formatting Instructions:"), 1)
+    check("...and the still-open guard",
+          numeric_prompt.count("STILL OPEN and has NOT yet resolved"), 1)
+
+    # The numeric flag used to reuse the BINARY literal — the same token
+    # caps_for_reasoning() matches to clamp a probability to [0.10, 0.90]. Two
+    # meanings behind one string in one codebase, and ungreppable.
+    check("the numeric flag is FIGURE AMBIGUITY",
+          ("FIGURE AMBIGUITY: LOW" in numeric_prompt)
+          and ("FIGURE AMBIGUITY: HIGH" in numeric_prompt), True)
+    check("...and the bare binary literal is gone from the numeric prompt",
+          bool(_re.search(r"(?<!FIGURE )AMBIGUITY: (LOW|HIGH)", numeric_prompt)), False)
+    check("the binary prompt still uses the bare literal it enforces",
+          bool(_re.search(r"(?<!FIGURE )AMBIGUITY: HIGH",
+                          src[src.index("async def _run_forecast_on_binary"):
+                              src.index("async def _run_forecast_on_multiple_choice")])), True)
+
+    # The criteria block was unlabelled on numeric, so edit 24 asked for a strict
+    # reading of something the prompt never named. Binary's sentence, verbatim.
+    check("the numeric prompt labels the resolution criteria",
+          "These criteria have not yet been satisfied" in numeric_prompt, True)
+    # And so does every other path. Edit 27's evidence — 90 peer points lost for
+    # not stating the "assume it has not happened yet" convention — is not
+    # numeric-specific, so leaving multiple choice and date unlabelled stopped
+    # one path short of the argument. Third audit pass, 21 Sept 2026.
+    check("...and so do all four prompts",
+          src.count("These criteria have not yet been satisfied"), 4)
+    for _p, _a, _b in (("multiple choice", "async def _run_forecast_on_multiple_choice",
+                        "async def _multiple_choice_prompt_to_forecast"),
+                       ("date", "async def _run_forecast_on_date",
+                        "async def _date_prompt_to_forecast")):
+        check(f"the {_p} prompt labels its criteria",
+              "These criteria have not yet been satisfied" in src[src.index(_a):src.index(_b)], True)
+
+    # ADVISORY, and now at least VISIBLE. Nothing enforces the numeric flag, so
+    # the only honest thing to do is log whether one came back.
+    _numpath = src[src.index("async def _numeric_prompt_to_forecast"):
+                   src.index("##################################### DATE QUESTIONS")]
+    check("the numeric path logs the flag it asked for",
+          "_figure_ambiguity_flag(reasoning)" in _numpath, True)
+    check("...under the name the prompt uses, so the log is greppable",
+          '"FIGURE AMBIGUITY on %s: %s"' in _numpath, True)
+    # A parser that raises kills the sample before any line below it runs, so
+    # telemetry placed after the parse goes quiet on exactly the samples worth
+    # looking at. Third audit pass, 21 Sept 2026.
+    check("...and it is logged BEFORE the parse can kill the sample",
+          _numpath.index("_figure_ambiguity_flag")
+          < _numpath.index("_structure_output_paced"), True)
+    check("...and the date path does not, because it never asks",
+          "_figure_ambiguity_flag" in src[src.index("async def _date_prompt_to_forecast"):
+                                          src.index("def _create_upper_and_lower_bound_messages")], False)
+
+    flag, _ = load("_figure_ambiguity_flag")
+    check("no flag returns None", flag("reasoning with no flag"), None)
+    check("empty is safe", flag(""), None)
+    check("None is safe", flag(None), None)
+    check("a HIGH line is read", flag("blah\nFIGURE AMBIGUITY: HIGH\nblah"), "HIGH")
+    check("a LOW line is read", flag("blah\nFIGURE AMBIGUITY: LOW"), "LOW")
+    check("lower case is accepted", flag("figure ambiguity: high"), "HIGH")
+    check("markdown decoration is accepted", flag("**FIGURE AMBIGUITY: HIGH**"), "HIGH")
+    check("a bullet is accepted", flag("- FIGURE AMBIGUITY: LOW"), "LOW")
+    check("the LAST line wins", flag("FIGURE AMBIGUITY: LOW\nthen\nFIGURE AMBIGUITY: HIGH"), "HIGH")
+    check("mid-sentence is not an answer",
+          flag("the FIGURE AMBIGUITY: HIGH marker goes here"), None)
+    check("a hyphenated label still counts", flag("FIGURE-AMBIGUITY: HIGH"), "HIGH")
+    # Telemetry must never kill a forecast, the same rule _scoring_grid_message
+    # follows. Anything it cannot read is None, not a raise. Fourth audit pass.
+    check("an object it cannot read is None, not a raise", flag(object()), None)
+    check("a list is None, not a raise", flag([1, 2, 3]), None)
+    # The two flags must not read each other. This is the whole point of the
+    # rename: caps_for_reasoning anchors its line at AMBIGUITY, so a line
+    # beginning FIGURE fails the anchor, and vice versa.
+    check("the binary flag does not match the numeric one",
+          caps("FIGURE AMBIGUITY: HIGH"), NORMAL)
+    check("the numeric flag does not match the binary one",
+          flag("AMBIGUITY: HIGH"), None)
+
+    print("\n  -- the binary parser fills a DECIMAL field --")
+    # BLOCKER, caught by audit 21 Sept 2026 before any paid run. The first
+    # version of the binary parsing instruction said "as a percentage from 0 to
+    # 100". The field is BinaryPrediction.prediction_in_decimal, whose validator
+    # raises outside [0, 1] — and STRUCTURE_OUTPUT_ALLOWED_TRIES is 1, so a
+    # raise is a dead sample, not a retry. Worse, a 1% forecast parsed as "1"
+    # coerces to 0.999 and then clamps to BINARY_CEILING: a 1% belief published
+    # at 98%, silently, with one warning line in a four-month log.
+    _binpath = src[src.index("async def _binary_prompt_to_forecast"):
+                   src.index("##################################### MULTIPLE CHOICE")]
+    check("the binary parser is told the field is a decimal",
+          "DECIMAL BETWEEN 0 AND 1" in _binpath, True)
+    check("...and is given the conversion",
+          "73% becomes 0.73" in _binpath, True)
+    check("...and is NOT told to emit 0 to 100",
+          "percentage from 0 to 100" in _binpath, False)
+    check("...and that anything above 1 in the FIELD is wrong",
+          "A value above 1 in that field is always wrong" in _binpath, True)
+    check("...and to ignore every other percentage in the text",
+          "Ignore every other percentage in the text" in _binpath, True)
+    # BLOCKER, third audit pass. The first escape hatch read "a value between 0
+    # and 1" — which is what "1%" and "0.5%" look like to a literal parser, so
+    # it reopened the 1%-published-at-98% inversion that the bullet above it
+    # exists to close. The hatch must key on the ABSENCE OF A PERCENT SIGN.
+    check("the decimal escape hatch keys on the percent sign, not the size",
+          'Never read "1%" as 1' in _binpath, True)
+    check("...and the old wording is gone",
+          "a value between 0 and 1" in _binpath, False)
+    # SECOND ATTEMPT AT THE SAME BULLET, fourth audit pass. "WITHOUT a percent
+    # sign, use unchanged" still let "Probability: 1" through: the validator
+    # maps exactly 1 to 0.999 rather than raising, and the caps then publish it
+    # at 0.98. The hatch is now bounded to decimals BELOW 1.
+    check("...the hatch only covers decimals below 1",
+          "WITHOUT a percent sign as a decimal below 1" in _binpath, True)
+    check("...and a bare 1 is spelled out as 0.01",
+          '"Probability: 1" is 0.01' in _binpath, True)
+    check("...and a bare 73 as 0.73",
+          '"Probability: 73" is 0.73' in _binpath, True)
+    # Mutation survivors, fourth audit pass: the suite asserted these bullets
+    # EXISTED but never what they SAID, so reversing their meaning stayed green.
+    check("...the parser takes the FINAL answer, not the first",
+          "Take the percentage the text gives as its FINAL answer" in _binpath, True)
+    check("...the hatch says use the value unchanged",
+          "use that value unchanged" in _binpath, True)
+    check("...and the sub-1% conversion is stated correctly",
+          "0.5% is 0.005" in _binpath, True)
+    check("...and the caps still apply after the parse",
+          "caps_for_reasoning(reasoning)" in _binpath, True)
+
+    print("\n  -- a short option list costs a SAMPLE, not the question --")
+    # MultipleChoiceReport.aggregate_predictions raises on mismatched option
+    # names OUTSIDE the per-sample gather, so one truncated parse forfeited the
+    # whole question. Same class as the numeric get_cdf() fix. Audit, 21 Sept.
+    _mcpath = src[src.index("async def _multiple_choice_prompt_to_forecast"):
+                  src.index("##################################### NUMERIC")]
+    check("the guard says so when it cannot read the options",
+          "Option guard could not read this question's options" in src, True)
+    check("the check is called on the multiple-choice path",
+          "_reject_mismatched_options(predicted_option_list, question)" in _mcpath, True)
+    check("...before the value is returned",
+          _mcpath.index("_reject_mismatched_options")
+          < _mcpath.index("return ReasonedPrediction"), True)
+
+    # RUN it. A mutation test turned the raise into a logger.warning and every
+    # check still passed, because they only grepped the source. Second audit.
+    reject, _ = load("_reject_mismatched_options")
+    class _Opt:
+        def __init__(self, name): self.option_name = name
+    class _List:
+        def __init__(self, names): self.predicted_options = [_Opt(x) for x in names]
+    _q3 = _Q(options=["Yes", "No", "Maybe"])
+    check("a correct list is accepted", reject(_List(["Yes", "No", "Maybe"]), _q3), None)
+    check("order does not matter", reject(_List(["Maybe", "Yes", "No"]), _q3), None)
+    check("a truncated list is rejected", raises(reject, _List(["Yes"]), _q3), True)
+    check("an extra option is rejected",
+          raises(reject, _List(["Yes", "No", "Maybe", "Other"]), _q3), True)
+    # A SET comparison would pass this one, and the library's separate length
+    # check would then raise OUTSIDE the gather — losing the whole question, and
+    # if the duplicating sample is predictions[0], losing the good ones too.
+    check("a DUPLICATED option is rejected",
+          raises(reject, _List(["Yes", "Yes", "No", "Maybe"]), _q3), True)
+    check("a renamed option is rejected", raises(reject, _List(["yes", "No", "Maybe"]), _q3), True)
+    # ...and it must go quiet, not loud, if the library ever renames a field.
+    check("an unrecognised shape is ignored, not raised on",
+          reject(object(), _q3), None)
+    check("...and so is a question with no options", reject(_List(["Yes"]), object()), None)
+
+    print("\n  -- the grid line never leaves an orphan bullet --")
+    # _scoring_grid_message returns "" on any anomaly. The prompt used to supply
+    # the "- " itself, so an empty return rendered a bare dash, and the bullet
+    # below it referred to "the scoring bins above" that were no longer there.
+    check("the message carries its own bullet",
+          grid(_Q(cdf_size=201, lower_bound=0, upper_bound=100)).startswith("- "), True)
+    check("...and an empty one carries nothing", grid(_Q()), "")
+    check("the prompt no longer supplies a dash",
+          "- {grid_message}" in numeric_prompt, False)
+    check("the concentration bullet is self-contained",
+          "this question's scoring bins are FINER" in numeric_prompt, True)
+    check("...and no longer points upward at a line that may be absent",
+          "the scoring bins above" in numeric_prompt, False)
+
+    print("\n  -- the date parser is scoped like the numeric one --")
+    _datepath = src[src.index("async def _date_prompt_to_forecast"):
+                    src.index("def _create_upper_and_lower_bound_messages")]
+    check("the date parser reads only the final block",
+          'Parse ONLY the final "Percentile NN: YYYY-MM-DD" block' in _datepath, True)
+    check("...and names the format the date prompt actually asks for",
+          "Percentile 10: YYYY-MM-DD" in src, True)
+
+    print("\n  -- parser guards, ported by hand from forecasting-tools v0.3.0 --")
+    # v0.3.0 added them to ITS copy of the template. Bumping the dependency
+    # delivers neither, because this file vendors its own bot class and every
+    # parse call is ours. Verified 21 Sept 2026.
+    check("the shared constant exists", "_PARSER_GUARDS = (" in src, True)
+    check("...guard one refuses an already-settled reading",
+          "STILL OPEN and has NOT resolved" in src, True)
+    check("...guard two refuses merging two answers",
+          "Never merge two candidate answers and never average them" in src, True)
+    # It must NOT read as "emit one option" on the multiple-choice path, where
+    # the answer is a list of N and a short list forfeits the question.
+    check("...and never says 'parse exactly one'",
+          "Parse exactly one" in src, False)
+    check("...it says use the last one IN FULL",
+          "and use it IN FULL" in src, True)
+    # MUTATION SURVIVOR, third audit pass: reversing LAST to FIRST left all 276
+    # checks green. "Use the last, not the first" IS the guard; the rest is
+    # decoration. Assert the word itself.
+    check("...and it is the LAST answer, not the first",
+          "Use only the LAST complete final answer" in src, True)
+    check("...with no 'FIRST complete' anywhere near it",
+          "FIRST complete" in src, False)
+    check("all four parse paths reference it",
+          src.count("{self._PARSER_GUARDS}"), 4)
+    for _fn, _end in (("_binary_prompt_to_forecast", "#### MULTIPLE CHOICE"),
+                      ("_multiple_choice_prompt_to_forecast", "#### NUMERIC"),
+                      ("_numeric_prompt_to_forecast", "#### DATE"),
+                      ("_date_prompt_to_forecast", "def _create_upper_and_lower_bound_messages")):
+        _body = src[src.index(f"async def {_fn}"):src.index(_end, src.index(f"async def {_fn}"))]
+        check(f"{_fn} carries the guards", "{self._PARSER_GUARDS}" in _body, True)
+        # NOT just "additional_instructions=" — that matches "=None", and a
+        # mutation test proved the whole suite stays green while the blocker fix
+        # is built and then thrown away. Second audit pass, 21 Sept 2026.
+        check(f"{_fn} passes additional_instructions",
+              "additional_instructions=parsing_instructions" in _body, True)
+    # The guards are substituted into a clean_indents() prompt. If the second
+    # bullet lost its twelve-space indent the whole prompt would stop dedenting.
+    # The guards are substituted into a clean_indents() prompt. Evaluate the
+    # literal rather than eyeballing it. NOTE, corrected 21 Sept 2026: an
+    # earlier version of this comment claimed a flush-left line would stop the
+    # whole prompt dedenting. It would not. clean_indents() is not
+    # textwrap.dedent — it takes the deeper of the first two lines' indents and
+    # lstrips anything shallower — so the twelve-space continuation is for
+    # readability, not correctness. The shape is still asserted, because a
+    # ragged constant is a sign the patch mangled it.
+    _guards = None
+    for _node in ast.walk(ast.parse(src)):
+        if isinstance(_node, ast.Assign) and any(
+            getattr(_t, "id", "") == "_PARSER_GUARDS" for _t in _node.targets
+        ):
+            _guards = ast.literal_eval(_node.value)
+    check("the guards constant evaluates", _guards is None, False)
+    _lines = (_guards or "").split("\n")
+    check("the guards are exactly two bullets", len(_lines), 2)
+    check("the first starts flush, to sit after the placeholder",
+          _lines[0].startswith("- The question is STILL OPEN"), True)
+    check("the second carries twelve spaces, to align under it",
+          len(_lines) > 1 and _lines[1].startswith(" " * 12 + "- The text may contain"), True)
+    # The old check here ("no element contains a newline") was vacuous: _lines
+    # came from split("\n"), so no element ever could. Replaced with the thing
+    # that actually matters — the escape must still be an ESCAPE in
+    # patch_phase1.py. A real newline there is the 1 Sept bug, and it would
+    # split the string literal rather than the rendered text.
+    _psrc = pathlib.Path(__file__).with_name("patch_phase1.py").read_text()
+    _pguards = _psrc[_psrc.index("_PARSER_GUARDS = ("):]
+    _pguards = _pguards[:_pguards.index("\n    )")]
+    check("the guards are one source line per bullet in the patch",
+          len([_l for _l in _pguards.splitlines() if _l.strip().startswith("'")]), 2)
 
     print()
     if failures:
