@@ -595,9 +595,9 @@ replace(
 replace(
     "            - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.",
     "            - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.\n"
-    "            - WHOLE-NUMBER OUTCOMES. Some questions ask for a count \u2014 launches, cases, seats, people, events \u2014 where the answer can only be a whole number. You are asked for percentiles on a continuous scale, so it is possible to put probability on 0.3 or 1.5. Those are outcomes that cannot happen, and probability placed there is simply thrown away.\n"
-    "            - If the quantity can only be a whole number, say so explicitly in your reasoning, then straddle the ONE OR TWO most likely whole numbers with a close pair of percentiles (for example 0.99 and 1.01), so that probability lands where the answer can actually be. Keep the values strictly increasing.\\n"
-    "            - Do NOT straddle more than two whole numbers, and do NOT spend percentiles 10 and 90 on straddles. Those two stay ordinary wide tail values. Six percentiles only buy you two or three straddles, and a distribution that spends all of them on spikes has no tails left \u2014 which loses far more when the answer falls outside the spikes than the spikes gain when it does not.",
+    "            - {grid_message}\n"
+    "            - CONCENTRATING PROBABILITY. Only when the scoring bins above are FINER than the grid the resolution source publishes on is it worth concentrating. For example, if the source reports whole numbers but each bin covers a fraction of one, place a close pair of percentiles either side of the one or two values you think most likely (such as 41.99 and 42.01) so the probability lands in the bins that can actually occur. Keep the values strictly increasing.\n"
+    "            - Never concentrate on more than two values, and never spend percentiles 10 and 90 on it \u2014 those stay ordinary wide tail values. A distribution that spends all six percentiles on spikes has no tails left, which loses far more when the answer falls outside them than the spikes gain when it does not. If the bins are as wide as the published grid or wider, do none of this: forecast smoothly.",
     "integer-valued numeric questions: keep the mass on achievable values",
 )
 
@@ -615,8 +615,214 @@ replace(
 replace(
     "            - When parsing the text, please make sure to give the values (the ones assigned to percentiles) in terms of the correct units.",
     "            - When parsing the text, please make sure to give the values (the ones assigned to percentiles) in terms of the correct units.\n"
-    "            - Preserve the values exactly as written, including small decimal offsets such as 0.99 or 1.01. Do NOT round them to whole numbers.",
+    "            - Preserve the values exactly as written, including small decimal offsets such as 0.99 or 1.01. Do NOT round them to whole numbers.\n"
+    "            - Parse ONLY the final \"Percentile NN: value\" block. Ignore every other number in the text, including base rates, reference-class figures, scoring-grid widths and interpretation notes.",
     "numeric parser: preserve small decimal offsets, do not round",
+)
+
+# ---------------------------------------------------------------------------
+# 22. THE NUMERIC PROMPT GETS THE BINARY PROMPT'S SAFEGUARDS  (21 Sept 2026)
+#
+#     Edit 2 built three things and wired all of them into the BINARY prompt
+#     only: the still-open guard, the adversarial resolution-criteria reading
+#     with its AMBIGUITY flag, and an explicit base-rate step. The numeric prompt
+#     got none of them, and nobody noticed for three weeks.
+#
+#     That is not a small gap. Numeric and discrete questions were roughly 45% of
+#     the 7-25 Sept MiniBench round and 31% of the Spring seasonal tournament. So
+#     close to half of every round was being forecast with no adversarial read of
+#     the criteria and no reference class — by a bot whose entire stated first
+#     pillar is adversarial reading of the criteria. Found by audit, 21 Sept 2026.
+#
+#     The numeric versions are adapted, not copied. On a binary question the
+#     criteria decide WHETHER something counts; on a numeric one they decide
+#     WHICH PUBLISHED FIGURE counts — which source, as of which date, in which
+#     units, rounded how. That is the failure this step has to catch, and the
+#     Spring advice notebook prices the related one: bot maker #45 reported
+#     losing 90 peer points purely for not telling the model about the
+#     "assume it has not happened yet" convention.
+#
+#     ⚠️ ONE HONEST DIFFERENCE FROM THE BINARY PATH. On binary, AMBIGUITY: HIGH is
+#     ENFORCED in code — caps_for_reasoning() clamps the probability to
+#     [0.10, 0.90]. Here it is ADVISORY only: the model is asked to widen its own
+#     interval. Enforcing it would mean rewriting percentiles after the fact, and
+#     this project has already lost points once to exactly that
+#     (_sorted_percentiles, retracted 31 Aug). Do not read the flag on a numeric
+#     question as a guarantee that the distribution was widened.
+#
+#     The lettered list is reordered rather than appended to, so the base rate
+#     anchors the reasoning BEFORE the scenarios are generated rather than after
+#     them. It also gains an explicit slot for the whole-number judgement that
+#     edit 20 asks for, which until now had nowhere to go.
+# ---------------------------------------------------------------------------
+replace(
+    """            Before answering you write:
+            (a) The time left until the outcome to the question is known.
+            (b) The outcome if nothing changed.
+            (c) The outcome if the current trend continued.
+            (d) The expectations of experts and markets.
+            (e) A brief description of an unexpected scenario that results in a low outcome.
+            (f) A brief description of an unexpected scenario that results in a high outcome.
+
+            {self._get_conditional_disclaimer_if_necessary(question)}
+            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
+
+            The last thing you write is your final answer as:
+            "
+            Percentile 10: XX (lowest number value)""",
+    """            This question is STILL OPEN and has NOT yet resolved. If your research
+            appears to show the figure is already settled, treat that as a warning
+            sign rather than a conclusion: re-read the resolution criteria and the
+            resolution date, and check whether the number you have found is really
+            the one being asked for. A figure that resembles the answer, from a
+            different source or a different date, is not the answer.
+
+            FIRST, before anything else, read the resolution criteria adversarially.
+            You are forecasting a specific published number, not the general topic.
+            Which source publishes it, as of which date, in which units, rounded
+            how, and cumulative or per-period - each of those changes the answer,
+            and a forecaster who gets the world right and the definition wrong
+            loses anyway.
+
+            Write:
+            (i)  The strictest reasonable reading of the resolution criteria,
+                 stated as a precise test: which published figure, from which
+                 source, as of which date, in which units.
+            (ii) Any OTHER reading a careful person might take. If a different
+                 reading would produce a materially different number, say so.
+
+            Then, on its own line, exactly one of:
+            AMBIGUITY: LOW
+            AMBIGUITY: HIGH
+            Use HIGH only when competing readings would genuinely produce
+            different numbers - not merely because the future is uncertain.
+            Uncertainty about the world is normal and belongs in the spread of
+            your distribution. Uncertainty about WHICH QUANTITY is being asked for
+            is different: if you write HIGH, widen your 10 to 90 interval
+            materially, because you are not entitled to a sharp distribution when
+            you are unsure what is being measured.
+
+            Before answering you write:
+            (a) The time left until the outcome to the question is known.
+            (b) The base rate or reference class: how this quantity has behaved
+                over comparable past periods. State the numbers behind it and
+                treat that as your starting anchor before adjusting for anything
+                current.
+            (c) The outcome if nothing changed.
+            (d) The outcome if the current trend continued.
+            (e) The expectations of experts and markets.
+            (f) The grid the resolution source publishes on - whole numbers, one
+                decimal place, two decimals - and, ONLY if the scoring bins are
+                finer than that grid, which values you consider most likely.
+            (g) A brief description of an unexpected scenario that results in a low outcome.
+            (h) A brief description of an unexpected scenario that results in a high outcome.
+
+            {self._get_conditional_disclaimer_if_necessary(question)}
+            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
+
+            The last thing you write is your final answer as:
+            "
+            Percentile 10: XX (lowest number value)""",
+    "numeric prompt: still-open guard, adversarial criteria read, base rate",
+)
+
+# ---------------------------------------------------------------------------
+# 23. THE SCORING GRID, AND THE RETRACTION OF EDIT 20'S PREMISE (21 Sept 2026)
+#
+#     ⚠️ EDIT 20 WAS BUILT ON A CLAIM THAT IS FALSE. It told the model that
+#     probability placed on 0.3 or 1.5 for a count question "cannot happen and is
+#     simply thrown away". An audit pulled the REAL parameters of every numeric
+#     and discrete question in the 7-25 Sept MiniBench round and measured them
+#     against the pinned SDK. Metaculus publishes q45541 - the very question edit
+#     20 cites - as a DISCRETE question with range -0.5 to 4.5 and five bins of
+#     width 1.0, each centred on an integer. Probability at 0.3 lands in the "0"
+#     bin. Probability at 0.6 lands in the "1" bin. Nothing is thrown away.
+#
+#     Measured on q45541, which resolved at 1: our actual output scored 0.365 of
+#     probability on the outcome, not the 0.0124 an earlier audit computed
+#     against assumed 201-bin continuous parameters. Straddling there is worth
+#     +0.18 nats when right and -0.31 when wrong - a coin flip - and it spends
+#     two of six percentiles inside a single bin.
+#
+#     WHERE IT GENUINELY WINS is the opposite case: a NUMERIC-typed integer
+#     quantity whose bins are FINER than the grid the source publishes on.
+#     q45561 (Brazil measles, 29-70 over 200 bins, width 0.205) measured +2.84
+#     nats when right against -0.39 when wrong. That is about one question in
+#     thirty, not the twenty-five in thirty edit 20 and edit 22 between them were
+#     about to fire on.
+#
+#     So the test is not "is it a whole number" - it is "are the scoring bins
+#     finer than the publication grid". That is computable, so the bot is told
+#     rather than asked to guess. It also catches cases edit 20's framing missed
+#     entirely, such as a source publishing to one decimal place.
+#
+#     This edit supersedes edit 20's bullets. Edit 20 is left in the file with
+#     its comment intact rather than deleted, because the disclosure record
+#     should show the retraction and not just the corrected version.
+# ---------------------------------------------------------------------------
+replace(
+    """    async def _run_forecast_on_numeric(
+        self, question: NumericQuestion, research: str
+    ) -> ReasonedPrediction[NumericDistribution]:
+        upper_bound_message, lower_bound_message = (
+            self._create_upper_and_lower_bound_messages(question)
+        )""",
+    """    async def _run_forecast_on_numeric(
+        self, question: NumericQuestion, research: str
+    ) -> ReasonedPrediction[NumericDistribution]:
+        upper_bound_message, lower_bound_message = (
+            self._create_upper_and_lower_bound_messages(question)
+        )
+        grid_message = _scoring_grid_message(question)""",
+    "numeric path: compute the scoring grid before building the prompt",
+)
+
+replace(
+    """    parser = argparse.ArgumentParser(""",
+    """def _scoring_grid_message(question) -> str:
+    \"\"\"Describe the scoring grid so the model can judge when to concentrate.
+
+    Metaculus scores a numeric question over a fixed number of bins. Whether it
+    is worth concentrating probability on particular values depends entirely on
+    how that grid compares with the grid the resolution source publishes on:
+
+      bins WIDER than the published grid  -> a smooth distribution already puts
+                                             the mass in the right bin, and
+                                             spiking wastes percentiles
+      bins FINER than the published grid  -> concentration is worth a great deal
+                                             (+2.84 nats measured on q45561)
+
+    Discrete questions arrive with one bin per achievable outcome, so they fall
+    in the first case and need no special handling at all - which is the
+    opposite of what edit 20 assumed.
+
+    Never raises: a missing or odd attribute yields an empty string and the
+    prompt simply omits the line. An advisory line is not worth a dead sample.
+    \"\"\"
+    try:
+        bins = getattr(question, "cdf_size", None) or 0
+        lower = question.lower_bound
+        upper = question.upper_bound
+        if not bins or bins < 2 or upper is None or lower is None:
+            return ""
+        width = (upper - lower) / (bins - 1)
+        if width <= 0:
+            return ""
+        return (
+            f"This question is scored over {bins} bins, each about {width:.4g} "
+            "wide. Concentrating probability on particular values only helps if "
+            "those bins are FINER than the grid the resolution source itself "
+            "publishes on. If the source reports whole numbers and a bin is a "
+            "whole number wide or wider, a smooth distribution already places "
+            "your probability in the correct bin and you should not try to "
+            "spike it."
+        )
+    except Exception:  # an advisory line must never kill a forecast
+        return ""
+
+
+    parser = argparse.ArgumentParser(""",
+    "a helper that states the scoring grid, failing silently to nothing",
 )
 
 DST.write_text(text, encoding="utf-8")

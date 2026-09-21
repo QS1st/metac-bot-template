@@ -864,54 +864,111 @@ def run():
     check("numeric and date samples force CDF expansion per sample",
           len(_re.findall(r"prediction\.get_cdf\(\)", src)), 2)
     # Our own parsing instruction used to manufacture the validator's rejection.
-    print("\n  -- whole-number outcomes keep their probability mass --")
-    # MEASURED, not theoretical. MiniBench q45541 asked how many SpaceX orbital
-    # launches would occur on a day. All five samples answered 0.0 / 0.1 / 0.3 /
-    # 0.6 / 1.0 / 1.5, spreading mass across values a count cannot take. It
-    # RESOLVED AT 1, sitting at our 80th percentile where the density is
-    # thinnest. Laertes' maker reported the same class of loss in Discord on
-    # 19 Sept. MiniBench is ~45% numeric.
-    check("the numeric prompt names whole-number outcomes",
-          "WHOLE-NUMBER OUTCOMES" in src, True)
-    check("...and says why mass on impossible values is lost",
-          bool(_re.search(r"cannot happen, and probability placed there is simply thrown away", src)), True)
-    check("...and asks the model to straddle the whole number",
-          bool(_re.search(r"straddle the ONE OR TWO most likely whole numbers", src)), True)
-    check("...with a worked example of the offset pair",
-          bool(_re.search(r"for example 0\.99 and 1\.01", src)), True)
-    # The straddle avoids emitting REPEATED percentile values. Note the honest
-    # position, measured against the pinned SDK on 21 Sept 2026: repeating
-    # actually scores BETTER (0.19 of the mass in the resolution bin against
-    # 0.102), because the repair helper nudges in-bounds repeats DOWN. We
-    # straddle anyway because that helper is open SDK issue #212 with an unmerged
-    # fix, so the direction could reverse mid-season. Robust, not optimal.
-    check("...and to keep the values strictly increasing",
-          bool(_re.search(r"Keep the values strictly increasing", src)), True)
-    # And it must be a PROMPT change only. This project has already lost points
-    # to its own percentile surgery once (_sorted_percentiles, retracted 31 Aug).
-    check("no new percentile post-processing was added",
-          len(_re.findall(r"def _\w*percentile\w*\(", src)), 1)
-    # Bound to the numeric function's SPAN, not just "before the date prompt".
-    # The previous form used str.index, which returns the FIRST match, so a stray
-    # second copy inside the date prompt would have passed. Audit, 21 Sept 2026.
-    check("the instruction appears exactly once",
-          src.count("WHOLE-NUMBER OUTCOMES"), 1)
+    print("\n  -- the numeric prompt has the binary prompt's safeguards --")
+    # Edit 2 built the still-open guard, the adversarial criteria read and the
+    # base-rate step, and wired ALL of them into the binary prompt only. Numeric
+    # and discrete were ~45% of the 7-25 Sept MiniBench round and 31% of the
+    # Spring seasonal tournament, so close to half of every round was forecast
+    # with none of them — by a bot whose stated first pillar is adversarial
+    # reading of the criteria. Found by audit, 21 Sept 2026.
     _num = src.index("async def _run_forecast_on_numeric")
     _dat = src.index("async def _run_forecast_on_date")
-    _ins = src.index("WHOLE-NUMBER OUTCOMES")
-    check("...inside _run_forecast_on_numeric, not the date path",
-          _num < _ins < _dat, True)
+    numeric_prompt = src[_num:_dat]
 
-    # The straddle is capped and the tails are protected. Without this the model
-    # can spend all six percentiles on spikes; an audit measured that as a ~3 nat
-    # loss when the answer falls outside them, against ~1.7 gained when it does not.
-    check("the straddle is capped at two whole numbers",
-          bool(_re.search(r"Do NOT straddle more than two whole numbers", src)), True)
-    check("...and percentiles 10 and 90 are protected as tails",
-          bool(_re.search(r"do NOT spend percentiles 10 and 90 on straddles", src)), True)
-    # The parser is a separate cheaper model and would otherwise round the pair away.
-    check("the parser is told not to round the offsets away",
-          bool(_re.search(r"Do NOT round them to whole numbers", src)), True)
+    check("the numeric prompt has the still-open guard",
+          "STILL OPEN and has NOT yet resolved" in numeric_prompt, True)
+    check("...the adversarial criteria read",
+          "read the resolution criteria adversarially" in numeric_prompt, True)
+    check("...an AMBIGUITY flag with both literals",
+          ("AMBIGUITY: LOW" in numeric_prompt) and ("AMBIGUITY: HIGH" in numeric_prompt), True)
+    check("...and an explicit base-rate step",
+          "base rate or reference class" in numeric_prompt, True)
+
+    # The numeric version must be ADAPTED, not copied. On a binary question the
+    # criteria decide WHETHER something counts; on a numeric one they decide
+    # WHICH PUBLISHED FIGURE counts — source, date, units, rounding.
+    check("the criteria step is numeric-specific, not the binary wording",
+          "which published figure, from which" in numeric_prompt, True)
+    check("...and the binary-only phrasing did not leak in",
+          "the annual maximum" in numeric_prompt, False)
+
+    # Base rate must anchor BEFORE the scenarios, not after them.
+    check("the base rate comes before the low/high scenarios",
+          numeric_prompt.index("base rate or reference class")
+          < numeric_prompt.index("results in a low outcome"), True)
+
+    # The lettered list gained a slot for the grid judgement. It keys on the
+    # PUBLISHED GRID rather than whole-number-ness, because edit 23 retracted
+    # that framing: an audit measured the real question parameters and found
+    # Metaculus already bins discrete questions one-per-integer.
+    check("the lettered list has a slot for the published-grid judgement",
+          "The grid the resolution source publishes on" in numeric_prompt, True)
+
+    # HONEST LIMIT: on binary, AMBIGUITY: HIGH is ENFORCED by caps_for_reasoning.
+    # On numeric it is ADVISORY — enforcing it would mean rewriting percentiles
+    # after the fact, which is the _sorted_percentiles mistake. Assert the
+    # asymmetry deliberately so nobody later assumes parity.
+    check("the numeric ambiguity flag asks the MODEL to widen, not code",
+          "widen your 10 to 90 interval" in numeric_prompt, True)
+    check("...and no numeric caps helper was introduced",
+          bool(_re.search(r"def caps_for_numeric|def widen_\w+\(", src)), False)
+
+    print("\n  -- concentration is keyed on the SCORING GRID, not whole numbers --")
+    # RETRACTION. Edit 20 claimed probability on 0.3 for a count question "cannot
+    # happen and is simply thrown away". FALSE. An audit pulled the real
+    # parameters of every numeric/discrete question in the 7-25 Sept round:
+    # Metaculus publishes q45541 as DISCRETE with five bins of width 1.0 centred
+    # on integers, so 0.3 lands in the "0" bin. Our actual output scored 0.365 of
+    # probability on the outcome, not 0.0124. Straddling there is +0.18 nats when
+    # right, -0.31 when wrong. It wins only where bins are FINER than the
+    # published grid (q45561: +2.84 nats) — about 1 question in 30.
+    check("the false 'thrown away' claim is gone from the prompt",
+          "simply thrown away" in src, False)
+    check("concentration is conditioned on the bins being finer than the grid",
+          "FINER than the grid the resolution source publishes on" in src, True)
+    check("...and says to forecast smoothly otherwise",
+          "do none of this: forecast smoothly" in src, True)
+    check("the scoring grid is computed and interpolated, not guessed",
+          ("_scoring_grid_message(question)" in src) and ("{grid_message}" in src), True)
+
+    # LITERAL BACKSLASH-N. Edit 20 shipped `increasing.\\n` in a non-raw string,
+    # so the cap-at-two guardrail rendered mid-sentence behind a stray escape
+    # instead of as its own bullet — in the prompt that runs on ~51% of a round.
+    # Same class as the 1 Sept newline bug, mirrored. Every existing guard was
+    # blind: the patch/main diff agreed, and the tests asserted PRESENCE, not
+    # STRUCTURE. Audit, 21 Sept 2026.
+    _numstart = src.index("async def _run_forecast_on_numeric")
+    _datstart = src.index("async def _run_forecast_on_date")
+    _binstart = src.index("async def _run_forecast_on_binary")
+    for _label, _span in (
+        ("numeric", src[_numstart:_datstart]),
+        ("binary", src[_binstart:_binstart + 6000]),
+    ):
+        check(f"no literal backslash-n leaked into the {_label} prompt",
+              "\\n" in _span, False)
+
+    # The grid helper is advisory. It must never kill a forecast.
+    grid, modsG = load("_scoring_grid_message")
+    class _Q:
+        def __init__(self, **kw): self.__dict__.update(kw)
+    check("a normal question yields a grid line",
+          "scored over" in grid(_Q(cdf_size=201, lower_bound=0, upper_bound=100)), True)
+    check("a discrete question reports its wide bins",
+          "1" in grid(_Q(cdf_size=5, lower_bound=-0.5, upper_bound=4.5)), True)
+    for _bad in (_Q(cdf_size=None, lower_bound=0, upper_bound=1),
+                 _Q(cdf_size=1, lower_bound=0, upper_bound=1),
+                 _Q(cdf_size=201, lower_bound=5, upper_bound=5),
+                 _Q(cdf_size=201, lower_bound=None, upper_bound=1),
+                 _Q()):
+        check("a degenerate question yields an empty string, never a raise",
+              grid(_bad), "")
+
+    # Edit 22 put base rates and reference-class figures upstream of a
+    # single-shot parser. It must be told to ignore them.
+    check("the parser is scoped to the final percentile block",
+          'Parse ONLY the final "Percentile NN: value" block' in src, True)
+    check("...and item (f) keys on the published grid, not whole-number-ness",
+          "The grid the resolution source publishes on" in src, True)
 
     check("the parser is told never to emit a literal zero",
           bool(_re.search(r"NEVER emit exactly 0", src)), True)

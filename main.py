@@ -1518,6 +1518,7 @@ class SummerTemplateBot2026(ForecastBot):
         upper_bound_message, lower_bound_message = (
             self._create_upper_and_lower_bound_messages(question)
         )
+        grid_message = _scoring_grid_message(question)
         prompt = clean_indents(
             f"""
             You are a professional forecaster interviewing for a job.
@@ -1546,16 +1547,56 @@ class SummerTemplateBot2026(ForecastBot):
             - Please notice the units requested and give your answer in these units (e.g. whether you represent a number as 1,000,000 or 1 million).
             - Never use scientific notation.
             - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.
-            - WHOLE-NUMBER OUTCOMES. Some questions ask for a count — launches, cases, seats, people, events — where the answer can only be a whole number. You are asked for percentiles on a continuous scale, so it is possible to put probability on 0.3 or 1.5. Those are outcomes that cannot happen, and probability placed there is simply thrown away.
-            - If the quantity can only be a whole number, say so explicitly in your reasoning, then straddle the ONE OR TWO most likely whole numbers with a close pair of percentiles (for example 0.99 and 1.01), so that probability lands where the answer can actually be. Keep the values strictly increasing.\n            - Do NOT straddle more than two whole numbers, and do NOT spend percentiles 10 and 90 on straddles. Those two stay ordinary wide tail values. Six percentiles only buy you two or three straddles, and a distribution that spends all of them on spikes has no tails left — which loses far more when the answer falls outside the spikes than the spikes gain when it does not.
+            - {grid_message}
+            - CONCENTRATING PROBABILITY. Only when the scoring bins above are FINER than the grid the resolution source publishes on is it worth concentrating. For example, if the source reports whole numbers but each bin covers a fraction of one, place a close pair of percentiles either side of the one or two values you think most likely (such as 41.99 and 42.01) so the probability lands in the bins that can actually occur. Keep the values strictly increasing.
+            - Never concentrate on more than two values, and never spend percentiles 10 and 90 on it — those stay ordinary wide tail values. A distribution that spends all six percentiles on spikes has no tails left, which loses far more when the answer falls outside them than the spikes gain when it does not. If the bins are as wide as the published grid or wider, do none of this: forecast smoothly.
+
+            This question is STILL OPEN and has NOT yet resolved. If your research
+            appears to show the figure is already settled, treat that as a warning
+            sign rather than a conclusion: re-read the resolution criteria and the
+            resolution date, and check whether the number you have found is really
+            the one being asked for. A figure that resembles the answer, from a
+            different source or a different date, is not the answer.
+
+            FIRST, before anything else, read the resolution criteria adversarially.
+            You are forecasting a specific published number, not the general topic.
+            Which source publishes it, as of which date, in which units, rounded
+            how, and cumulative or per-period - each of those changes the answer,
+            and a forecaster who gets the world right and the definition wrong
+            loses anyway.
+
+            Write:
+            (i)  The strictest reasonable reading of the resolution criteria,
+                 stated as a precise test: which published figure, from which
+                 source, as of which date, in which units.
+            (ii) Any OTHER reading a careful person might take. If a different
+                 reading would produce a materially different number, say so.
+
+            Then, on its own line, exactly one of:
+            AMBIGUITY: LOW
+            AMBIGUITY: HIGH
+            Use HIGH only when competing readings would genuinely produce
+            different numbers - not merely because the future is uncertain.
+            Uncertainty about the world is normal and belongs in the spread of
+            your distribution. Uncertainty about WHICH QUANTITY is being asked for
+            is different: if you write HIGH, widen your 10 to 90 interval
+            materially, because you are not entitled to a sharp distribution when
+            you are unsure what is being measured.
 
             Before answering you write:
             (a) The time left until the outcome to the question is known.
-            (b) The outcome if nothing changed.
-            (c) The outcome if the current trend continued.
-            (d) The expectations of experts and markets.
-            (e) A brief description of an unexpected scenario that results in a low outcome.
-            (f) A brief description of an unexpected scenario that results in a high outcome.
+            (b) The base rate or reference class: how this quantity has behaved
+                over comparable past periods. State the numbers behind it and
+                treat that as your starting anchor before adjusting for anything
+                current.
+            (c) The outcome if nothing changed.
+            (d) The outcome if the current trend continued.
+            (e) The expectations of experts and markets.
+            (f) The grid the resolution source publishes on - whole numbers, one
+                decimal place, two decimals - and, ONLY if the scoring bins are
+                finer than that grid, which values you consider most likely.
+            (g) A brief description of an unexpected scenario that results in a low outcome.
+            (h) A brief description of an unexpected scenario that results in a high outcome.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
             You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
@@ -1586,6 +1627,7 @@ class SummerTemplateBot2026(ForecastBot):
             - This text is trying to answer the numeric question: "{question.question_text}".
             - When parsing the text, please make sure to give the values (the ones assigned to percentiles) in terms of the correct units.
             - Preserve the values exactly as written, including small decimal offsets such as 0.99 or 1.01. Do NOT round them to whole numbers.
+            - Parse ONLY the final "Percentile NN: value" block. Ignore every other number in the text, including base rates, reference-class figures, scoring-grid widths and interpretation notes.
             - The units for the forecast are: {question.unit_of_measure}
             - Your work will be shown publicly with these units stated verbatim after the numbers your parse.
             - As an example, someone else guessed that the answer will be between {question.lower_bound} {question.unit_of_measure} and {question.upper_bound} {question.unit_of_measure}, so the numbers parsed from an answer like this would be verbatim "{question.lower_bound}" and "{question.upper_bound}".
@@ -1941,6 +1983,48 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+def _scoring_grid_message(question) -> str:
+    """Describe the scoring grid so the model can judge when to concentrate.
+
+    Metaculus scores a numeric question over a fixed number of bins. Whether it
+    is worth concentrating probability on particular values depends entirely on
+    how that grid compares with the grid the resolution source publishes on:
+
+      bins WIDER than the published grid  -> a smooth distribution already puts
+                                             the mass in the right bin, and
+                                             spiking wastes percentiles
+      bins FINER than the published grid  -> concentration is worth a great deal
+                                             (+2.84 nats measured on q45561)
+
+    Discrete questions arrive with one bin per achievable outcome, so they fall
+    in the first case and need no special handling at all - which is the
+    opposite of what edit 20 assumed.
+
+    Never raises: a missing or odd attribute yields an empty string and the
+    prompt simply omits the line. An advisory line is not worth a dead sample.
+    """
+    try:
+        bins = getattr(question, "cdf_size", None) or 0
+        lower = question.lower_bound
+        upper = question.upper_bound
+        if not bins or bins < 2 or upper is None or lower is None:
+            return ""
+        width = (upper - lower) / (bins - 1)
+        if width <= 0:
+            return ""
+        return (
+            f"This question is scored over {bins} bins, each about {width:.4g} "
+            "wide. Concentrating probability on particular values only helps if "
+            "those bins are FINER than the grid the resolution source itself "
+            "publishes on. If the source reports whole numbers and a bin is a "
+            "whole number wide or wider, a smooth distribution already places "
+            "your probability in the correct bin and you should not try to "
+            "spike it."
+        )
+    except Exception:  # an advisory line must never kill a forecast
+        return ""
+
 
     parser = argparse.ArgumentParser(description="Run the template forecasting bot")
     parser.add_argument(

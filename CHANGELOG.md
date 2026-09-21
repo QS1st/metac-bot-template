@@ -12,7 +12,84 @@ different bot.
 
 ---
 
-## 2026-09-21 — whole-number outcomes keep their probability
+## 2026-09-21 (same day, second pass) — RETRACTION, and the numeric prompt catches up
+
+**The entry below is wrong and this one supersedes it.** It is left in place
+because this file is the disclosure record and the retraction is part of it.
+
+**What was wrong.** The entry below claims that probability placed on 0.3 or 1.5
+for a count question sits on outcomes that "cannot take" and is thrown away. An
+adversarial audit pulled the real parameters of every numeric and discrete
+question in the 7–25 September MiniBench round and measured them against the
+pinned SDK. Metaculus publishes q45541 — the very question the entry cites — as a
+**discrete** question with range −0.5 to 4.5 over five bins of width 1.0, each
+centred on an integer. Probability at 0.3 lands in the "0" bin. Probability at
+0.6 lands in the "1" bin. Nothing is thrown away.
+
+Measured on q45541, which resolved at 1: our actual output placed **0.365** of
+its probability on the outcome, not the 0.0124 an earlier audit had computed
+against assumed 201-bin continuous parameters. Straddling there is worth about
+**+0.18 nats when right and −0.31 when wrong** — a coin flip that also spends two
+of six percentiles inside a single bin.
+
+**Where concentration genuinely wins** is the opposite case: a *numeric*-typed
+integer quantity whose bins are **finer** than the grid its source publishes on.
+Measured on q45561 (Brazil measles, 29–70 over 200 bins, width 0.205):
+**+2.84 nats when right against −0.39 when wrong.** That is roughly one question
+in thirty — not the twenty-five in thirty the previous version was about to fire
+on, since its new mandatory reasoning step would have answered "yes, whole
+numbers" on every discrete question in the round.
+
+**The corrected rule.** The test is not "is it a whole number" but "are the
+scoring bins finer than the publication grid". That is computable, so the bot is
+now told rather than asked to guess: `_scoring_grid_message()` derives the bin
+count and width from the question and states them in the prompt, and the
+concentration instruction is explicitly conditional on that comparison. If the
+bins are as wide as the published grid or wider, the instruction is to forecast
+smoothly. The helper never raises; a missing or odd attribute yields an empty
+string and the line is simply omitted.
+
+This also catches a case the whole-number framing missed entirely — a source
+that publishes to one decimal place.
+
+**A literal `\n` was shipped into the numeric prompt.** The previous entry's
+third bullet ended with a doubled backslash in a non-raw string, so the
+cap-at-two-values guardrail rendered mid-sentence behind a stray escape instead
+of as its own bullet — in the prompt that runs on about half of every round.
+This is the same class as the newline bug of 1 September, mirrored, and every
+existing guard was blind to it: the patch and `main.py` agreed, and the tests
+asserted the text was *present* rather than correctly *structured*. There is now
+a test asserting no literal backslash-n appears in any prompt span.
+
+**The numeric prompt gained the binary prompt's safeguards.** Edit 2 built a
+still-open guard, an adversarial resolution-criteria reading with an AMBIGUITY
+flag, and an explicit base-rate step — and wired all three into the binary prompt
+only. Numeric and discrete were **30 of 59 questions (51%)** in the September
+round and 31% of the Spring seasonal tournament, and were being forecast with
+none of them. The numeric versions are adapted rather than copied: on a binary
+question the criteria decide whether something counts, on a numeric one they
+decide *which published figure* counts. Audit evidence for that framing, from
+the round's 30 numeric questions: 28 name an explicit source, 27 specify units or
+a worked conversion, 23 are cumulative or per-period.
+
+The lettered reasoning list is reordered from (a)–(f) to (a)–(h) so the base rate
+anchors before the scenarios rather than after them.
+
+**One honest asymmetry, recorded so nobody assumes parity.** On binary,
+`AMBIGUITY: HIGH` is *enforced* in code by `caps_for_reasoning()`. On numeric it
+is *advisory* — the model is asked to widen its own interval. Enforcing it would
+mean rewriting percentiles after the fact, which this project retracted once
+already. Two tests assert the asymmetry deliberately.
+
+**Also fixed:** the numeric parser is now scoped to the final percentile block
+and told to ignore base rates, reference-class figures and grid widths, since
+those now sit upstream of it in the reasoning; and the date prompt is
+deliberately left untouched, since FutureEval uses only binary, numeric, discrete
+and multiple-choice, and the round contained no date questions.
+
+---
+
+## 2026-09-21 — whole-number outcomes keep their probability *(SUPERSEDED — see above)*
 
 **The measured loss.** MiniBench question 45541 asked how many SpaceX orbital
 launches would occur on 17 September. The answer can only be a whole number. All
