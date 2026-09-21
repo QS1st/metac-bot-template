@@ -67,3 +67,64 @@ jobs:
             exit 1
           fi
           echo "main.py is reproducible from the patch."
+
+      # AST STRUCTURE. py_compile proves main.py parses; it says nothing about
+      # its SHAPE. On 21 September 2026 a patch edit anchored on a line INSIDE
+      # the `if __name__ == "__main__":` suite, and inserting a column-zero def
+      # above it ended the suite — leaving everything from argparse to EOF as
+      # unreachable code in a helper's body. The bot would have started,
+      # configured logging and exited 0: a green tick every ten minutes for four
+      # months and not one forecast. It parsed, it matched the patch, and 255
+      # unit tests passed over it. test_phase1.py now checks this too; it is
+      # repeated here because this is the job that cannot be skipped.
+      - name: The __main__ block must still be the end of the file
+        run: |
+          python - <<'EOF'
+          import ast, pathlib, sys
+          src = pathlib.Path("main.py").read_text()
+          tree = ast.parse(src)
+          guards = [n for n in tree.body
+                    if isinstance(n, ast.If) and "__main__" in ast.dump(n.test)]
+          if len(guards) != 1:
+              sys.exit(f"::error::expected one __main__ guard, found {len(guards)}")
+          guard = guards[0]
+          if tree.body[-1] is not guard:
+              sys.exit("::error::something is defined AFTER the __main__ guard")
+          if guard.end_lineno != len(src.splitlines()):
+              sys.exit(
+                  f"::error::the __main__ block ends at line {guard.end_lineno} "
+                  f"of {len(src.splitlines())} - its body has been truncated"
+              )
+          print(f"__main__ runs to line {guard.end_lineno}, the end of the file.")
+          EOF
+
+  # THE ONE CHECK THE UNIT TESTS CANNOT DO. Everything above runs without the
+  # dependencies, deliberately — it is fast and cannot touch a live question.
+  # But that means nothing verifies that main.py can actually be IMPORTED: that
+  # every name it pulls from forecasting_tools still exists in the pinned
+  # version, and that bot_helpers.py still exports what it is asked for. An
+  # import error surfaces only when a scheduled run dies, which is the worst
+  # possible place to find out. No secrets, no network calls to Metaculus, no
+  # model spend — MODEL_TIER defaults to "test" and the __main__ block does not
+  # run on import. Added 21 September 2026.
+  import-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+      - name: Show the resolved forecasting-tools version
+        run: poetry run python -c "import importlib.metadata as m; print('forecasting-tools', m.version('forecasting-tools'))"
+      - name: main.py must import
+        run: poetry run python -c "import main; print('main.py imported cleanly')"
