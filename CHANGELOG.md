@@ -241,8 +241,58 @@ The upstream template was reconstructed locally and confirmed byte-identical
 through the existing patch, so this batch was checked with the **real**
 rebuild-and-diff rather than the residue heuristic that stands in for it when
 upstream is absent. 35 patch edits apply cleanly; `main.py` is byte-identical to
-the patch output; **298 checks pass, up from 197**; and nineteen deliberate mutations of today's changes are each caught by them. Nothing here has been run
-against a live question yet.
+the patch output; **298 checks pass, up from 197**; and nineteen deliberate
+mutations of today's changes are each caught by them.
+
+### 8. What happened when it ran
+
+Run #15 of the Test Bot workflow, 21 September 2026 17:55-18:03 UTC, against
+**bot-testing-area** — unscored, so nothing here affects a tournament. Trial
+tier, five predictions per question. Eight question URLs, ten forecasts (group
+questions unpack into subquestions), **ten submitted, none failed, no thin
+research, no exceptions**.
+
+**The numeric work is landing, and the model's own reasoning is the evidence.**
+Two verbatim extracts:
+
+> "The Treasury reports values to three decimal places (0.001%). Since the
+> scoring bins are approximately 0.05 wide — far wider than the reported
+> precision grid — no point concentration..."
+
+> "(f) Grid of resolution source: Silver Bulletin reports approval and
+> disapproval numbers rounded to one decimal place. The scoring grid consists of
+> bins approx 0.175 wide..."
+
+That is item (f) of the lettered list being answered, `_scoring_grid_message`
+arriving intact, and the concentrate-or-smooth judgement coming out **correct**:
+bins wider than the publication grid, so forecast smoothly. **Zero straddle pairs
+in the entire run.** Under edit 20's original premise — retracted earlier the
+same day — the bot would have spiked on every one of those questions at a
+measured cost of roughly 0.6 nats each.
+
+`FIGURE AMBIGUITY` fired on every numeric sample, all LOW. The value is not the
+verdict but the fact that there was one: had they read "not declared", the
+adversarial read would not have been happening at all, and we would have found
+that out over a season instead of for pennies.
+
+Nothing feared appeared. Binary predictions ran 0.02 to 0.38 — **no 0.98, so no
+trace of the parser inversion**. The binary ambiguity flag was emitted on its own
+line every time; the "no flag found" warning never fired. No option-guard
+rejections, no opt-outs, no dead samples.
+
+**Cost, measured against the counter rather than estimated.** The preflight read
+`used $7.61` at 17:56:35; the account read `$8.2535` after the run. So ten
+forecasts cost **$0.6435 — about $0.064 each**, against the $0.057 measured on
+the old prompts over 59 MiniBench questions. Roughly 12% dearer, which is what a
+longer numeric prompt and a new binary parsing block ought to cost. On 300-400
+season questions that is about $21-28 at trial tier.
+
+A note on reading that figure: the OpenRouter dashboard showed **$1.31 for the
+day**, which is not this run. The tournament workflow was still enabled until
+07:52 UTC, so roughly $0.67 of the day belongs to the morning's MiniBench runs.
+Taking the daily total as the run cost would have overstated it by half and
+poisoned the tier decision due on 28 September. Two readings of the same
+counter, either side of the run, are the number.
 
 ## 2026-09-21 (same day, second pass) — RETRACTION, and the numeric prompt catches up
 
