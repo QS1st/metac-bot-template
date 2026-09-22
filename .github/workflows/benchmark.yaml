@@ -1,0 +1,65 @@
+name: Benchmark vs community prediction
+
+# MANUAL ONLY, and deliberately so. This spends money on model calls, and a
+# scheduled benchmark would quietly bill for a diagnostic nobody asked for.
+#
+# It publishes NOTHING to Metaculus. benchmark_vs_cp.py constructs the bot with
+# publish_reports_to_metaculus=False and screens every question against the
+# bot-tournament slug markers, because Metaculus forbids testing on OPEN or
+# UPCOMING tournament questions. Questions that have already closed, and
+# main-site questions, are explicitly allowed.
+#
+# COST. $0.064 a question was measured on 21 Sept, BEFORE subquestion research
+# and resolution-source checking shipped. With those, expect $0.081-0.094 a
+# question, so 25 questions is roughly $2.00-2.35 and 15 is $1.20-1.40.
+# The script prints the OpenRouter balance before it spends anything; read it.
+on:
+  workflow_dispatch:
+    inputs:
+      questions:
+        description: "How many main-site binary questions to test on"
+        required: false
+        default: "25"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    # Twenty-five questions at five predictions each, paced at 8 calls a minute,
+    # is roughly 16 minutes of model calls before research. Forty gives room
+    # without letting a hung run bill for GitHub's six-hour default.
+    timeout-minutes: 40
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      - name: Benchmark against the community prediction
+        run: |
+          poetry run python benchmark_vs_cp.py --questions "${{ github.event.inputs.questions || 25 }}"
+        env:
+          # TEST_MODEL_TIER, not MODEL_TIER. The same separation the Test Bot
+          # workflow uses: a diagnostic must never be able to reconfigure the
+          # live scheduled bot.
+          MODEL_TIER: ${{ vars.TEST_MODEL_TIER }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
