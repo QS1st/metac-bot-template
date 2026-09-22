@@ -143,30 +143,37 @@ jobs:
           import sys
           from forecasting_tools import BinaryPrediction, PredictedOptionList
 
-          # Exactly 1 must COERCE, not raise. If this ever starts raising, the
-          # binary parser bullets about bare numbers need rewriting.
+          # Exactly 1 must COERCE to 0.999, not raise. This is the behaviour that
+          # let a 1% belief reach 98%: the validator quietly accepts 1, and our
+          # caps then clamp it. If it ever starts raising instead, the binary
+          # parser's bullets about bare numbers can be relaxed.
           v = BinaryPrediction(prediction_in_decimal=1).prediction_in_decimal
           if v != 0.999:
               sys.exit(f"::error::BinaryPrediction(1) gave {v}, expected 0.999")
 
-          # Anything above 1 must still raise, which is what makes a percentage
-          # mis-parse fail as a sample instead of publishing.
+          # Anything above 1 must still raise. That is what makes a percentage
+          # mis-parse fail as a SAMPLE rather than publish a wrong number.
+          # try/except/else, not a nested catch: an earlier version of this step
+          # wrote `except sys.exit.__class__`, which is not an exception class at
+          # all, and the job died on a TypeError instead of checking anything.
           try:
               BinaryPrediction(prediction_in_decimal=73)
-              sys.exit("::error::BinaryPrediction(73) did not raise")
-          except sys.exit.__class__:
-              raise
           except Exception:
               pass
+          else:
+              sys.exit("::error::BinaryPrediction(73) did not raise - a percentage mis-parse would now publish")
 
-          # The option guard reads these two attribute names.
-          ol = PredictedOptionList(predicted_options=[
-              {"option_name": "A", "probability": 0.5},
-              {"option_name": "B", "probability": 0.5},
-          ])
-          names = {o.option_name for o in ol.predicted_options}
+          # The option guard reads exactly these two attribute names.
+          try:
+              ol = PredictedOptionList(predicted_options=[
+                  {"option_name": "A", "probability": 0.5},
+                  {"option_name": "B", "probability": 0.5},
+              ])
+              names = {o.option_name for o in ol.predicted_options}
+          except Exception as exc:
+              sys.exit(f"::error::PredictedOptionList shape changed, the option guard reads it: {exc}")
           if names != {"A", "B"}:
-              sys.exit(f"::error::PredictedOptionList shape changed: {names}")
+              sys.exit(f"::error::PredictedOptionList returned {names}, expected A and B")
 
           print("library behaviours unchanged")
           EOF
