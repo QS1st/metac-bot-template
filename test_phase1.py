@@ -1332,6 +1332,51 @@ def run():
         check(f"status quo pair: {_label}", sqp(_text), _want)
     check("...and rubbish returns None rather than raising", sqp(object()), (None, None))
 
+    print("\n  -- the CP benchmark harness cannot touch a tournament --")
+    # A development practice, not a bot feature: nothing here runs during a
+    # season and nothing is published. But it calls get_benchmark_questions,
+    # which filters for open binary questions with a visible community
+    # prediction and does NOT filter by tournament — so without a screen it
+    # could test on live AIB questions, which the rules forbid.
+    _bench = pathlib.Path(__file__).with_name("benchmark_vs_cp.py").read_text()
+    check("the harness never publishes",
+          "publish_reports_to_metaculus=False" in _bench, True)
+    check("...and says so where it could be changed by accident",
+          "NEVER publish from this script" in _bench, True)
+    check("every question is screened against the bot-tournament markers",
+          "BOT_TOURNAMENT_SLUG_MARKERS" in _bench, True)
+    # Fails CLOSED here, unlike main.py where refusing on absent metadata would
+    # be a self-inflicted outage. Different asymmetry, stated in both places.
+    check("...and a question with no slugs is dropped, not allowed",
+          bool(_re.search(r"if not slugs:\s*\n\s*return False", _bench)), True)
+    check("...and it refuses to run on a short sample rather than substituting one",
+          "Refusing to run rather than quietly testing" in _bench, True)
+    # THE WORKFLOW LIVES IN TWO PLACES. This working folder is flat, but in the
+    # repository the workflows sit under .github/workflows/. A check that only
+    # looked beside this file passed locally and would have gone red on the very
+    # first push. Look in both, and say so if neither is there.
+    def _workflow(name):
+        here = pathlib.Path(__file__).parent
+        for candidate in (here / ".github" / "workflows" / name, here / name):
+            if candidate.exists():
+                return candidate.read_text()
+        return None
+    _bwf = _workflow("benchmark.yaml")
+    check("the benchmark workflow is findable", _bwf is not None, True)
+    _bwf = _bwf or ""
+    check("the harness reads the tier from TEST_MODEL_TIER, not MODEL_TIER",
+          "MODEL_TIER: ${{ vars.TEST_MODEL_TIER }}" in _bwf, True)
+    # A TRIGGER, not the word. The first version of this check searched for
+    # "schedule" anywhere in the file and tripped on the comment explaining why
+    # there isn't one.
+    check("...and the workflow is manual only",
+          "  workflow_dispatch:" in _bwf and not _re.search(r"^\s{2}schedule:", _bwf, _re.MULTILINE), True)
+    # It imports main.py rather than copying it, so the thing tested is the
+    # thing that runs.
+    for _name in ("BOT_TOURNAMENT_SLUG_MARKERS", "SummerTemplateBot2026", "build_llm_config"):
+        check(f"main.py still exports {_name}",
+              bool(_re.search(rf"^(def |class |){_name}\b", src, _re.MULTILINE)), True)
+
     print("\n  -- the researcher is sent to the resolution source --")
     # Fixtures below are the REAL resolution criteria of the three institutional
     # questions that cost us most in the 7-25 Sept round. Each names its source

@@ -12,6 +12,40 @@ different bot.
 
 ---
 
+## 2026-09-22 (sixth) — a way to find out before January
+
+**No change to the bot.** `benchmark_vs_cp.py` and the `Benchmark vs community
+prediction` workflow are a development practice, recorded here because Metaculus
+asks bot makers which ones they use and because the reasoning belongs with the
+rest.
+
+Seven changes shipped today and not one has been shown to improve a forecast.
+The season is the real measurement and does not report until January. This runs
+the bot over a sample of open main-site binary questions where a community
+prediction is visible, publishes nothing, and reports **the gap between our
+probability and the crowd's, split by which side of 50% we came down on**.
+
+That split is the point. The measured defect was a >50% book claiming 71% where
+reality delivered 50%. If the status quo check works, our confident book should
+now sit closer to the crowd. Beating the crowd is explicitly *not* the goal —
+peer score is measured against other bots, on a different question population —
+and the script says so in its own output.
+
+**The rule it must not break.** Metaculus forbids testing on open or upcoming
+tournament questions; closed ones and main-site ones are explicitly allowed.
+`get_benchmark_questions` does not filter by tournament, so every question is
+screened against the same `BOT_TOURNAMENT_SLUG_MARKERS` the live path uses — and
+this screen **fails closed**: a question carrying no slug metadata is dropped.
+That is the opposite of the live path, where refusing on absent data would be a
+self-inflicted outage. Different asymmetry, stated in both places.
+
+It also serves as the first live exercise of three code paths that have never
+met a real question: resolution-source extraction in the wild rather than
+against three fixtures, the subquestion arm, and the telemetry line.
+
+Nothing in `main.py` changed. The harness imports it rather than copying it, so
+what is tested is what runs.
+
 ## 2026-09-22 (fifth) — send the researcher to the source the question names
 
 ### What the questions were telling us all along
