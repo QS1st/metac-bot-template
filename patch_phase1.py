@@ -969,6 +969,78 @@ def _subquestion_arm(question_id) -> bool:
         return False
 
 
+MAX_RESOLUTION_SOURCES = 4
+
+
+def _resolution_sources(question) -> list:
+    \"\"\"URLs named in a question's resolution criteria and fine print.
+
+    THIS IS WHERE THE ANSWER ACTUALLY LIVES, and the bot was not reading it.
+    All three institutional questions that cost us most in the 7-25 Sept round
+    name their resolution source and give its URL, in the criteria:
+
+      q45527  "as shown on Congress.gov", plus the resolver's own prebuilt
+              search link, plus - explicitly - "A public announcement, press
+              release, or draft text without an assigned Congress.gov bill
+              number does not count."
+      q45576  "The primary check is the 'Launch Date' field on NASA's official
+              Crew-13 mission page (https://www.nasa.gov/mission/...)"
+      q45531  the ECDC weekly surveillance report, with its topic page URL
+
+    We forecast all three from a news summary about announcements, and got all
+    three wrong in the same direction. What would have settled them was in the
+    question text.
+
+    NOT a scraper. The URLs are handed to the research model, which already
+    fetches pages, handles bot protection and renders JavaScript - none of which
+    this project can verify from its own sandbox, and unverifiable HTTP code has
+    no place in a four-month unattended run. Congress.gov, the source for our
+    single worst question, returns nothing to a plain fetch.
+
+    Pure and total: no network, no state, [] on anything unexpected.
+    \"\"\"
+    try:
+        text = " ".join(
+            str(getattr(question, field, "") or "")
+            for field in ("resolution_criteria", "fine_print")
+        )
+        found, seen = [], set()
+        for raw in re.findall(r"https?://[^\\s<>\\"')\\]]+", text):
+            url = raw.rstrip(".,;:'\\")]}")
+            if url and url not in seen:
+                seen.add(url)
+                found.append(url)
+        return found[:MAX_RESOLUTION_SOURCES]
+    except Exception:
+        return []
+
+
+def _resolution_source_block(question) -> str:
+    \"\"\"The instruction that sends the researcher to those URLs, or "".
+
+    Deliberately NOT randomised. A third arm would split the season into eight
+    cells of about forty questions and attribute nothing. The natural control is
+    the questions that name no URL at all, and `sources_found` is logged per
+    question so that comparison can be made afterwards. That is a
+    quasi-experiment, not a randomised one - questions naming a source may
+    differ systematically from those that do not - and it is recorded as such.
+    \"\"\"
+    sources = _resolution_sources(question)
+    if not sources:
+        return ""
+    listed = "\\n".join(f"- {url}" for url in sources)
+    return (
+        "\\n\\nCHECK THESE SOURCES FIRST. The resolution criteria name them, so "
+        "they are what the question will actually be settled on:\\n"
+        f"{listed}\\n"
+        "For each, report what it says NOW about the specific step this question "
+        "turns on, and state plainly whether that step HAS or HAS NOT happened as "
+        "of today. An announcement, a press release, a draft or a scheduled date "
+        "is not the step. If a page will not load, or does not cover the point, "
+        "say so plainly rather than substituting other reporting."
+    )
+
+
 def _telemetry(**fields) -> None:
     \"\"\"Emit one greppable JSON object per sample. NEVER raises.
 
@@ -1617,6 +1689,7 @@ replace(
             kind=type(question).__name__,
             phase="research",
             subquestion_arm=in_arm,
+            sources_found=len(_resolution_sources(question)),
             base_chars=len(research or ""),
         )
         if not in_arm:
@@ -1688,6 +1761,30 @@ replace(
 
     ##################################### BINARY QUESTIONS #####################################""",
     "the researcher dispatch method and the subquestion pass",
+)
+
+# ---------------------------------------------------------------------------
+# 36. SEND THE RESEARCHER TO THE RESOLUTION SOURCE  (22 Sept 2026)
+#
+#     See _resolution_sources for the evidence. Short version: the questions
+#     that cost us most all named their resolution source and gave its URL, and
+#     the bot read a news summary instead.
+#
+#     Applied to EVERY question rather than randomised - the questions that name
+#     no URL are the natural control, and sources_found is logged so the
+#     comparison survives. Spring 2026 rates "uses web scraping" at r = +0.33;
+#     this does not tick that box, which means static or interactive scraping.
+#     It targets the same mechanism through infrastructure we already pay for.
+# ---------------------------------------------------------------------------
+replace(
+    """                {question.fine_print}
+                \"\"\"
+            )""",
+    """                {question.fine_print}
+                {_resolution_source_block(question)}
+                \"\"\"
+            )""",
+    "research prompt: check the sources the criteria name",
 )
 
 DST.write_text(text, encoding="utf-8")

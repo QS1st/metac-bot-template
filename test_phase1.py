@@ -1332,6 +1332,86 @@ def run():
         check(f"status quo pair: {_label}", sqp(_text), _want)
     check("...and rubbish returns None rather than raising", sqp(object()), (None, None))
 
+    print("\n  -- the researcher is sent to the resolution source --")
+    # Fixtures below are the REAL resolution criteria of the three institutional
+    # questions that cost us most in the 7-25 Sept round. Each names its source
+    # and gives the URL; the bot read a news summary instead and got all three
+    # wrong in the same direction.
+    srcs, blk, _smod = load("_resolution_sources", "_resolution_source_block",
+                            consts=("MAX_RESOLUTION_SOURCES",))
+
+    class _SrcQ:
+        def __init__(self, rc="", fp=""):
+            self.resolution_criteria, self.fine_print = rc, fp
+
+    _REAL = {
+        "q45527 ASI Act": (
+            "a bill ... as shown on Congress.gov. The resolver will search "
+            "Congress.gov (https://www.congress.gov/) for legislation in the "
+            "119th Congress",
+            ["https://www.congress.gov/"]),
+        "q45576 NASA Crew-13": (
+            "The primary check is the \"Launch Date\" field on NASA's official "
+            "Crew-13 mission page (https://www.nasa.gov/mission/nasas-spacex-crew-13/); "
+            "an announcement reported on NASA's Commercial Crew blog "
+            "(https://blogs.nasa.gov/commercialcrew/) or by credible sources also counts.",
+            ["https://www.nasa.gov/mission/nasas-spacex-crew-13/",
+             "https://blogs.nasa.gov/commercialcrew/"]),
+        "q45531 ECDC West Nile": (
+            "reached via the \"Weekly updates\" entry linked from ECDC's West Nile "
+            "virus infection topic page (https://www.ecdc.europa.eu/en/west-nile-virus-infection) "
+            "reports locally acquired",
+            ["https://www.ecdc.europa.eu/en/west-nile-virus-infection"]),
+    }
+    for _label, (_rc, _want) in _REAL.items():
+        check(f"sources extracted from {_label}", srcs(_SrcQ(_rc)), _want)
+    # Trailing punctuation is the whole difficulty: the URLs sit inside
+    # parentheses and are followed by semicolons and full stops.
+    check("a bracketed URL loses its bracket, not its path",
+          srcs(_SrcQ("see (https://example.org/a/b/c).")), ["https://example.org/a/b/c"])
+    # The bracketed case never exercises the rstrip, because the pattern stops at
+    # the bracket. A BARE url followed by a full stop does, and that mutation
+    # survived the first sweep.
+    check("a bare URL sheds its sentence punctuation",
+          srcs(_SrcQ("published at https://example.org/a/b/c.")), ["https://example.org/a/b/c"])
+    check("...and a trailing semicolon or comma too",
+          srcs(_SrcQ("one https://a.example/p, two https://b.example/q;")),
+          ["https://a.example/p", "https://b.example/q"])
+    check("a URL with query parameters survives intact",
+          srcs(_SrcQ("https://www.congress.gov/search?q=%7B%22congress%22%3A119%7D and more")),
+          ["https://www.congress.gov/search?q=%7B%22congress%22%3A119%7D"])
+    check("fine print is searched too, not just the criteria",
+          srcs(_SrcQ("nothing here", "but https://a.example/b is in the fine print")),
+          ["https://a.example/b"])
+    check("duplicates collapse", srcs(_SrcQ("http://a.com/x twice http://a.com/x")), ["http://a.com/x"])
+    check("the number of sources is capped",
+          len(srcs(_SrcQ(" ".join(f"http://e{i}.example/x" for i in range(9))))), 4)
+    # Pure and total. This runs on every question of a four-month unattended
+    # season, and a research prompt must never be lost to a parsing helper.
+    check("a question with no URLs yields none", srcs(_SrcQ("resolves on the S&P 500 close")), [])
+    check("None fields are safe", srcs(_SrcQ(None, None)), [])
+    check("an object with no such fields is safe", srcs(object()), [])
+
+    check("the block is empty when nothing is named", blk(_SrcQ("no urls at all")), "")
+    _b = blk(_SrcQ(_REAL["q45576 NASA Crew-13"][0]))
+    check("...and lists every source when something is",
+          all(u in _b for u in _REAL["q45576 NASA Crew-13"][1]), True)
+    check("...telling the researcher these settle the question",
+          "CHECK THESE SOURCES FIRST" in _b, True)
+    check("...and asking HAS or HAS NOT, which is the measured defect",
+          "HAS or HAS NOT happened as of today" in _b, True)
+    check("...with announcement explicitly excluded from counting as the step",
+          "is not the step" in _b, True)
+    check("...and no substituting other reporting when a page fails",
+          "rather than substituting other reporting" in _b, True)
+
+    # Wired into the research prompt, and logged so the quasi-experiment works:
+    # questions naming no URL are the natural control group.
+    check("the research prompt carries the block",
+          "{_resolution_source_block(question)}" in _rr, True)
+    check("...and the count is logged per question",
+          "sources_found=len(_resolution_sources(question))" in src, True)
+
     print("\n  -- the researcher does not pre-judge the answer --")
     # Upstream asked the research model for a rundown "including if the question
     # would resolve Yes or No based on current information", and handed that

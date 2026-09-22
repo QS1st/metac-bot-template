@@ -12,6 +12,76 @@ different bot.
 
 ---
 
+## 2026-09-22 (fifth) — send the researcher to the source the question names
+
+### What the questions were telling us all along
+
+The three institutional questions that cost us most **each name their resolution
+source and give its URL, in the criteria we already feed the model**:
+
+* **q45527** — *"as shown on Congress.gov"*, plus the resolver's own prebuilt
+  search link, plus, explicitly: *"A public announcement, press release, or draft
+  text without an assigned Congress.gov bill number does not count."*
+* **q45576** — *"The primary check is the 'Launch Date' field on NASA's official
+  Crew-13 mission page (https://www.nasa.gov/mission/nasas-spacex-crew-13/)"*
+* **q45531** — the ECDC weekly surveillance report, topic page URL given
+
+We forecast all three from a news summary about announcements and got all three
+wrong in the same direction. The question text contained the answer.
+
+`_resolution_sources` now pulls those URLs out of the criteria and fine print,
+and `_resolution_source_block` tells the researcher to check them and report
+**whether the required step HAS or HAS NOT happened as of today** — with an
+announcement, a plan, a draft or a scheduled date explicitly excluded from
+counting as the step, and no substituting other reporting when a page will not
+load.
+
+### Why this is not a scraper
+
+Spring 2026 rates *"uses web scraping"* at r = +0.33. This does not tick that
+box, which means static or interactive scraping, and the difference is
+deliberate.
+
+A fetcher cannot be verified from this project's sandbox — the proxy blocks
+arbitrary hosts, so **every live fetch returns nothing and the code's own
+`except` swallows it**. That is not a hypothetical: the prediction-market lookup
+built an hour earlier passed its "live" test on exactly that silence, and was
+only caught by instrumenting the failure path. Congress.gov, the source for our
+single worst question, returns nothing through the approved route either.
+Unverifiable HTTP code has no place in a four-month unattended run.
+
+Perplexity already fetches pages, handles bot protection and renders JavaScript,
+and we already pay for it. So the URLs go to the researcher, and the part this
+project writes — the extraction — is a pure function tested against the real
+criteria of the three questions it exists for.
+
+### Not randomised, and why
+
+A third arm would split the season into eight cells of about forty questions and
+attribute nothing. The natural control is **the questions that name no URL at
+all**, and `sources_found` is logged per question so the comparison survives.
+That is a quasi-experiment rather than a randomised one — questions that name a
+source may differ systematically from those that do not — and it is recorded
+here as such.
+
+### Also rejected today: the prediction-market lookup
+
+Built, tested against real data, and **reverted**. Manifold's liquidity on the
+kind of question Metaculus asks is 15–25 traders: a quality floor high enough to
+exclude a Fed rate market sitting at 1% on 18 traders also excludes almost
+everything else, so the feature would either never fire or inject confident
+nonsense. And the better half of that correlate — similar *Metaculus* questions —
+has no text search in the pinned SDK (`MetaculusClient` has none, `ApiFilter` has
+no search field), so it would have been built blind against an API needing a
+token this project does not handle. On the January list.
+
+### Verification
+
+Build byte-identical from verified upstream, 42 edits, `main.py` parses,
+**442 checks pass**. Extraction verified against the three real criteria; twelve
+mutations of this change run, all caught, including two that survived the first
+sweep. Nothing run against a live question.
+
 ## 2026-09-22 (fourth) — subquestion research, randomised, and the alarm it nearly switched off
 
 Spring 2026 puts *"researches subquestions"* at r = +0.24, q = 0.475, n = 41, on
