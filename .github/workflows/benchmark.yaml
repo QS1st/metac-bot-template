@@ -20,6 +20,11 @@ on:
         description: "How many main-site binary questions to test on"
         required: false
         default: "25"
+      diagnose:
+        description: "Count what survives each filter and stop. No forecasts, no cost."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}
@@ -49,7 +54,11 @@ jobs:
 
       - name: Benchmark against the community prediction
         run: |
-          poetry run python benchmark_vs_cp.py --questions "${{ github.event.inputs.questions || 25 }}"
+          if [ "${{ github.event.inputs.diagnose }}" = "true" ]; then
+            poetry run python benchmark_vs_cp.py --diagnose
+          else
+            poetry run python benchmark_vs_cp.py --questions "${{ github.event.inputs.questions || 25 }}"
+          fi
         env:
           # TEST_MODEL_TIER, not MODEL_TIER. The same separation the Test Bot
           # workflow uses: a diagnostic must never be able to reconfigure the
