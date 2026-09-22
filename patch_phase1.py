@@ -1072,7 +1072,7 @@ replace(
             The text given to you is a forecast of the probability that a binary question resolves YES.
             - This text is trying to answer the question: "{question.question_text}".
             - The text states its answer as a PERCENTAGE, for example "Probability: 73%". The field you are filling, prediction_in_decimal, is a DECIMAL BETWEEN 0 AND 1. Divide by one hundred: 73% becomes 0.73, 4% becomes 0.04, 99% becomes 0.99. A value above 1 in that field is always wrong and will be rejected.
-            - Take the percentage the text gives as its FINAL answer. Ignore every other percentage in the text, including base rates, reference-class figures and the probabilities inside scenarios.
+            - The answer is ALWAYS the final "Probability:" line, and nothing else. Ignore every other percentage in the text: base rates, reference-class figures, the probabilities inside scenarios, the STATUS QUO ANCHOR at (f), and the working figure at (g). The text may state a figure at (g) and then REVISE it at (h) — in that case the revision is what reaches the final line, and the final line is what you parse.
             - If the text writes its final answer WITHOUT a percent sign as a decimal below 1, such as "Probability: 0.73", use that value unchanged. A bare number of 1 or more is on the 0-100 scale: "Probability: 73" is 0.73, and "Probability: 1" is 0.01. A number followed by "%" is ALWAYS a percentage however small it is: 1% is 0.01, and 0.5% is 0.005. Never read "1%" as 1.
             {self._PARSER_GUARDS}
             \"\"\"
@@ -1206,6 +1206,130 @@ replace(
 
             Your research assistant says:""",
     "date prompt: label the resolution criteria",
+)
+
+# ---------------------------------------------------------------------------
+# 30. THE STATUS-QUO CHECK  (measured, 22 Sept 2026 — the largest single defect
+#     found in this project, and the one that cost us the round)
+#
+#     MEASURED, not reasoned. Per-question peer scores for all 59 scored
+#     questions of the 7-25 Sept MiniBench round, split by type and direction:
+#
+#       binary  25 q  -196.0  avg -7.84   53% of the loss
+#       MC       4 q  -139.6  avg -34.91  38% of the loss
+#       numeric 30 q   -35.9  avg -1.20   10% of the loss
+#
+#     And within binary, the whole story:
+#
+#       we said <=50%   15 q   mean forecast 24%   actually resolved YES  20%
+#       we said  >50%   10 q   mean forecast 71%   actually resolved YES  50%
+#
+#     The low half of the book is well calibrated. The high half is not: at 71%
+#     stated, reality is a coin flip. Because the scoring rule is asymmetric,
+#     those ten confident-YES calls produced -240.5 from the five that failed
+#     against only +67.0 from the five that landed. That net -173.5 is 88% of the
+#     entire binary loss, from 40% of the binary questions.
+#
+#     THE MECHANISM IS VISIBLE IN THE BOT'S OWN PUBLISHED COMMENTS. On every one
+#     of the three worst questions it states the status quo correctly and then
+#     talks itself out of it. Verbatim, q45527: "(c) Status quo outcome: NO. As
+#     of September 7, 2026, no bill with an assigned S. or H.R. number ...
+#     appears on Congress.gov." Forecast: 86%. Resolved NO. Score -80.9. The
+#     override: "press rollouts of this magnitude - complete with detailed
+#     statutory penalties, explicit bill titles, and joint bicameral leadership -
+#     typically i[ndicate]". Same shape on q45533 (status quo NO, forecast 72%)
+#     and q45576 (status quo NO, forecast 65%).
+#
+#     AND THERE IS A DOMAIN PATTERN. The five confident calls that failed are all
+#     institutional: a bill formally introduced, coalition talks publicly begun,
+#     an agency announcing a specific date, a reporting threshold crossed. The
+#     five that landed are market and price questions. The bot treats an
+#     announcement of intent as evidence of completion.
+#
+#     WHY THE PROMPT AND NOT THE CODE. The obvious alternative is to shrink the
+#     over-50% book toward the base rate in code. Re-scoring the round against a
+#     reconstructed field geometric mean says that is worth about +1.2 to +1.7 a
+#     question - real, but it is SELF-FITTED RECALIBRATION on 25 points from one
+#     round, which this project already examined and killed as a trap, and which
+#     would have been fitted on the very data used to justify it. It also treats
+#     the symptom. The defect is that the model names the status quo and then
+#     abandons it without completed evidence, so that is what is addressed.
+#
+#     DELIBERATELY MINIMAL. Nothing else in the binary prompt moves - not the
+#     lettered list, not the scenario order, not the caps. If this is ever
+#     measured, the change that moved it must be identifiable.
+# ---------------------------------------------------------------------------
+replace(
+    """            The last thing you write is your final answer as: "Probability: ZZ%", 0-100""",
+    """            Then run the STATUS QUO CHECK. It is the last thing you do before
+            answering, and nothing you write after it may move your number. Write:
+            (f) The probability implied by the status quo simply continuing,
+                as a number. That is your anchor.
+            (g) Your final probability, as a number.
+            (h) If (g) is ABOVE 50% and more than 20 points above (f), name the
+                specific COMPLETED, DATED, VERIFIABLE step that has ALREADY
+                happened and that justifies the move. An announcement, a stated intention, a
+                draft, a scheduled meeting, an expert expectation, press coverage
+                and elapsed time are NOT completed steps. If you cannot name one,
+                move (g) back toward (f) and say that you have done so. Whatever
+                number you end on after (h) is the one you state below.
+
+            Institutions miss deadlines. Where the question asks whether a
+            legislature, an agency, a company or an official will have COMPLETED a
+            formal step by a given date - introduced a bill, published a filing,
+            announced a specific date, begun formal talks, crossed a reporting
+            threshold - that step slips past short deadlines far more often than
+            the surrounding reporting suggests. Momentum in the news is not the
+            step being taken.
+
+            The last thing you write is your final answer as: "Probability: ZZ%", 0-100""",
+    "binary prompt: the status quo check, and institutional slippage",
+)
+
+# ---------------------------------------------------------------------------
+# 31. THE MULTIPLE-CHOICE FLOOR WENT ON THE OPTION THAT RESOLVED  (22 Sept 2026)
+#
+#     Multiple choice is 7% of the questions and 38% of the loss: four questions,
+#     -139.6, an average of -34.91 each. Both large losses are the SAME failure as
+#     edit 30, wearing a different hat - the option describing "nothing happened"
+#     got our 0.01 floor and then resolved:
+#
+#       q45555  "Where will GPT-6 Astra rank..."   resolved "Rank 21 or lower"  -129.9
+#       q45539  "If Anthropic files a public IPO..." resolved "No public S-1 filed yet"  -31.8
+#
+#     The two we won were a positive event and a null option we happened to like.
+#
+#     Edit 16 told the parser never to emit a literal zero and to use 0.01 as the
+#     minimum. That was correct for its own purpose - the library's validator
+#     rejects a sample outright if clamping moves an option by more than 0.05 -
+#     but 0.01 is a floor for options that are IMPOSSIBLE, and it was being
+#     applied to options that were merely dull. Nothing in the prompt asked the
+#     model to identify the status-quo option at all.
+#
+#     n = 4. Small, and stated plainly. But the mechanism is identical to the
+#     binary one measured over 25 questions, the fix is two lines, and the
+#     downside of holding 10% on a status-quo option that does not resolve is
+#     roughly a tenth of what one of these costs.
+# ---------------------------------------------------------------------------
+replace(
+    """            Before answering you write:
+            (a) The time left until the outcome to the question is known.
+            (b) The status quo outcome if nothing changed.
+            (c) A description of an scenario that results in an unexpected outcome.""",
+    """            Before answering you write:
+            (a) The time left until the outcome to the question is known.
+            (b) The status quo outcome if nothing changed.
+            (c) A description of an scenario that results in an unexpected outcome.
+            (d) Restate (b) as ONE OF THE LISTED OPTIONS - the status quo option,
+                the one that wins if nothing changes, nothing is announced and no
+                threshold is crossed. Name it exactly as it appears in the list. It
+                is often the lowest band, "no change", "none of the above", or the
+                option that simply describes the present state.
+            (e) Give that option at least 0.10 unless a completed, dated,
+                verifiable event has ALREADY ruled it out. A probability of 0.01 is
+                for an option that is genuinely impossible, not for one that is
+                merely dull.""",
+    "multiple-choice prompt: name and protect the status quo option",
 )
 
 DST.write_text(text, encoding="utf-8")

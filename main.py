@@ -1403,6 +1403,27 @@ class SummerTemplateBot2026(ForecastBot):
             You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.
             {self._get_conditional_disclaimer_if_necessary(question)}
 
+            Then run the STATUS QUO CHECK. It is the last thing you do before
+            answering, and nothing you write after it may move your number. Write:
+            (f) The probability implied by the status quo simply continuing,
+                as a number. That is your anchor.
+            (g) Your final probability, as a number.
+            (h) If (g) is ABOVE 50% and more than 20 points above (f), name the
+                specific COMPLETED, DATED, VERIFIABLE step that has ALREADY
+                happened and that justifies the move. An announcement, a stated intention, a
+                draft, a scheduled meeting, an expert expectation, press coverage
+                and elapsed time are NOT completed steps. If you cannot name one,
+                move (g) back toward (f) and say that you have done so. Whatever
+                number you end on after (h) is the one you state below.
+
+            Institutions miss deadlines. Where the question asks whether a
+            legislature, an agency, a company or an official will have COMPLETED a
+            formal step by a given date - introduced a bill, published a filing,
+            announced a specific date, begun formal talks, crossed a reporting
+            threshold - that step slips past short deadlines far more often than
+            the surrounding reporting suggests. Momentum in the news is not the
+            step being taken.
+
             The last thing you write is your final answer as: "Probability: ZZ%", 0-100
             """
         )
@@ -1419,7 +1440,7 @@ class SummerTemplateBot2026(ForecastBot):
             The text given to you is a forecast of the probability that a binary question resolves YES.
             - This text is trying to answer the question: "{question.question_text}".
             - The text states its answer as a PERCENTAGE, for example "Probability: 73%". The field you are filling, prediction_in_decimal, is a DECIMAL BETWEEN 0 AND 1. Divide by one hundred: 73% becomes 0.73, 4% becomes 0.04, 99% becomes 0.99. A value above 1 in that field is always wrong and will be rejected.
-            - Take the percentage the text gives as its FINAL answer. Ignore every other percentage in the text, including base rates, reference-class figures and the probabilities inside scenarios.
+            - The answer is ALWAYS the final "Probability:" line, and nothing else. Ignore every other percentage in the text: base rates, reference-class figures, the probabilities inside scenarios, the STATUS QUO ANCHOR at (f), and the working figure at (g). The text may state a figure at (g) and then REVISE it at (h) — in that case the revision is what reaches the final line, and the final line is what you parse.
             - If the text writes its final answer WITHOUT a percent sign as a decimal below 1, such as "Probability: 0.73", use that value unchanged. A bare number of 1 or more is on the 0-100 scale: "Probability: 73" is 0.73, and "Probability: 1" is 0.01. A number followed by "%" is ALWAYS a percentage however small it is: 1% is 0.01, and 0.5% is 0.005. Never read "1%" as 1.
             {self._PARSER_GUARDS}
             """
@@ -1474,6 +1495,15 @@ class SummerTemplateBot2026(ForecastBot):
             (a) The time left until the outcome to the question is known.
             (b) The status quo outcome if nothing changed.
             (c) A description of an scenario that results in an unexpected outcome.
+            (d) Restate (b) as ONE OF THE LISTED OPTIONS - the status quo option,
+                the one that wins if nothing changes, nothing is announced and no
+                threshold is crossed. Name it exactly as it appears in the list. It
+                is often the lowest band, "no change", "none of the above", or the
+                option that simply describes the present state.
+            (e) Give that option at least 0.10 unless a completed, dated,
+                verifiable event has ALREADY ruled it out. A probability of 0.01 is
+                for an option that is genuinely impossible, not for one that is
+                merely dull.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
             You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.

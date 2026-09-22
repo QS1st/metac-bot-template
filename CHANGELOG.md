@@ -12,6 +12,122 @@ different bot.
 
 ---
 
+## 2026-09-22 — the status quo check: the first change aimed at a MEASURED defect
+
+Everything before this was aimed at defects found by reading code. This one is
+aimed at a number.
+
+### What the round actually says
+
+Per-question peer scores for all 59 scored questions of the 7–25 September
+MiniBench round, split by type:
+
+| type | n | total | average | share of the loss |
+|---|---|---|---|---|
+| binary | 25 | −196.0 | **−7.84** | 53% |
+| multiple choice | 4 | −139.6 | **−34.91** | 38% |
+| numeric | 30 | −35.9 | **−1.20** | 10% |
+
+**Numeric was never the problem.** Edits 20 to 29 — two days of work, four audit
+rounds, one blocker caught — addressed 10% of the loss. The defects were real and
+the fixes stand, but the aim was wrong, and the earlier diagnosis of "the model's
+judgement" was reasoned from a histogram rather than measured.
+
+Within binary, the whole story:
+
+| | n | our mean forecast | actually resolved YES |
+|---|---|---|---|
+| we said ≤50% | 15 | 24% | **20%** |
+| we said >50% | 10 | 71% | **50%** |
+
+The low half of the book is well calibrated. The high half says 71% and delivers
+a coin flip. Because the scoring rule is asymmetric, those ten confident calls
+returned **−240.5 from five failures against +67.0 from five successes** — 88% of
+the binary loss from 40% of the binary questions.
+
+**The mechanism is in the bot's own published comments.** On all three worst
+questions it states the status quo correctly and then overrides it. Verbatim,
+q45527: *"(c) Status quo outcome: NO. As of September 7, 2026, no bill with an
+assigned S. or H.R. number … appears on Congress.gov."* Forecast 86%. Resolved
+NO. −80.9. The override: *"press rollouts of this magnitude … typically
+i[ndicate]"*. Same shape on q45533 (status quo NO, forecast 72%) and q45576
+(status quo NO, forecast 65%).
+
+There is a domain pattern too. All five failed confident calls are institutional
+— a bill formally introduced, coalition talks publicly begun, an agency
+announcing a date, a reporting threshold crossed. The five that landed are market
+and price questions. The bot reads an announcement of intent as completion.
+
+### Edit 30 — the status quo check
+
+The binary prompt now ends, immediately before the final answer, with three
+steps: **(f)** the probability implied by the status quo continuing, as a number;
+**(g)** the final probability, as a number; **(h)** if (g) is above 50% *and*
+more than 20 points above (f), name the specific completed, dated, verifiable
+step that justifies the move — an announcement, a stated intention, a draft, a
+scheduled meeting, an expert expectation, press coverage and elapsed time are
+explicitly not completed steps — otherwise walk (g) back toward (f). Followed by
+a paragraph on institutional slippage.
+
+**The gate is scoped to the measurement.** An earlier version keyed only on the
+20-point departure, which would have fired on the ≤50% book — where a
+status-quo-NO anchor of 5–15% makes any well-calibrated 30% look like a
+violation. That would have broken the half that works to fix the half that
+doesn't.
+
+**Deliberately minimal.** The lettered list is not reordered, the scenarios are
+not resequenced, the caps are untouched. If this is ever measured, the thing that
+moved it has to be identifiable.
+
+### Edit 31 — the multiple-choice floor went on the option that resolved
+
+Both large MC losses were the *nothing-happened* option sitting at our 0.01
+floor: "Rank 21 or lower" (−129.9) and "No public S-1 filed yet" (−31.8). Edit 16
+told the parser never to emit a literal zero and to use 0.01 as the minimum —
+correct for its own purpose, but 0.01 is a floor for options that are
+*impossible*, and it was landing on options that were merely dull. Nothing asked
+the model to identify the status-quo option at all.
+
+The prompt now makes it restate the status quo as one of the listed options and
+give it at least 0.10 unless a completed, dated event has already ruled it out.
+n = 4, which is small and is stated plainly here; the mechanism is the same one
+measured over 25 binary questions, and the cost of holding 0.10 on a status-quo
+option that does not resolve is roughly a tenth of what one of these cost.
+
+### What the audit caught in the above
+
+**A blocker that inverted the whole thing.** The binary parsing instruction was
+updated to say "the answer is (g)". But (h) exists precisely to *revise* (g)
+downward — so on exactly the questions edit 30 corrects, the parser was being
+pointed at the pre-correction number. Worse than a no-op: the edit newly invites
+a high (g) before the walk-back, so it could have published *higher* than before
+on the book that lost 240 points. The parser now follows the final
+`Probability:` line and is told to ignore both (f) and (g).
+
+**The check was not last, despite saying so.** The rationale paragraph and the
+conditional disclaimer sat between it and the answer, letting the model re-argue
+itself upward after checking. Re-anchored onto the final-answer line.
+
+Also fixed: the multiple-choice prompt spoke in percentages to a path whose
+answers are decimals summing to one; item (d) asked for the status quo a second
+time instead of resolving item (b) onto the option list; and item (e) referred to
+a 0.01 rule that lives in the parsing instruction, which the forecaster never
+sees.
+
+**Ten of the audit's fresh mutations survived the test suite first time** — most
+seriously, telling the parser to ignore the final answer line, and neutering the
+walk-back to "keep your original (g)". Both are now caught, along with duplicate
+lettering, an upper bound smuggled onto the floor, and a hedged floor. Fifteen
+mutations across the day, all caught.
+
+### Verification
+
+Build byte-identical from verified upstream, 37 edits, `main.py` parses, `__main__`
+runs to the last line, **341 checks pass**. CI now also asserts the two library
+behaviours these prompts are argued from — that a binary value of exactly 1
+coerces to 0.999 rather than raising, and that `predicted_options` still carries
+`option_name`. Nothing here has been run against a live question.
+
 ## 2026-09-21 (same day, third pass) — the parse paths get guards, and "FIRST" actually comes first
 
 Four changes, batched deliberately so that one paid test run covers the lot.

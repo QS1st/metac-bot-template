@@ -1129,6 +1129,144 @@ def run():
     check("the numeric flag does not match the binary one",
           flag("AMBIGUITY: HIGH"), None)
 
+    print("\n  -- the status quo check: the measured fix, 22 Sept 2026 --")
+    # MEASURED over 59 scored questions. The low half of our binary book was well
+    # calibrated (said 24%, delivered 20%); the high half said 71% and delivered
+    # 50%. Ten confident-YES calls returned -240.5 from five failures against
+    # +67.0 from five successes — 88% of the binary loss from 40% of the binary
+    # questions. The bot's own comments show it naming the status quo correctly
+    # and then overriding it on momentum: q45527 "(c) Status quo outcome: NO",
+    # forecast 86%, resolved NO, -80.9.
+    _binq = src[src.index("async def _run_forecast_on_binary"):
+                src.index("async def _binary_prompt_to_forecast")]
+    check("the binary prompt runs a status quo check", "STATUS QUO CHECK" in _binq, True)
+    check("...it asks for the anchor as a NUMBER, not a narrative",
+          "probability implied by the status quo simply continuing" in _binq, True)
+    check("...and for the final probability as a number too",
+          "(g) Your final probability, as a number." in _binq, True)
+    check("...it sets a threshold for departing from the anchor",
+          "more than 20 points above (f)" in _binq, True)
+    # SCOPED TO THE MEASUREMENT. The <=50% book was well calibrated (24% stated,
+    # 20% delivered) and must not be pushed down with the bad half. A
+    # status-quo-NO anchor sits near 5-15%, so an ungated 20-point rule would
+    # have fired on a perfectly good 30%. Audit, 22 Sept 2026.
+    check("...and only on the half of the book that was measured broken",
+          "(g) is ABOVE 50% and more than 20 points above (f)" in _binq, True)
+    # M7 survived an earlier mutation sweep: neutering the walk-back left every
+    # check green. The DIRECTION of the correction is the correction.
+    check("...and the correction walks the number DOWN, not anywhere",
+          "move (g) back toward (f)" in _binq, True)
+    check("...and that number is what gets stated",
+          bool(_re.search(r"number you end on after \(h\) is the one you state", _binq)), True)
+    check("...the momentum warning survives",
+          "Momentum in the news is not the" in _binq, True)
+    check("...and demands COMPLETED evidence to depart",
+          "COMPLETED, DATED, VERIFIABLE step" in _binq, True)
+    # The specific failure: an announcement was read as completion, five times.
+    for _notevidence in ("An announcement", "a stated intention", "a scheduled meeting",
+                         "press coverage", "elapsed time"):
+        check(f"...{_notevidence!r} is named as NOT a completed step",
+              _notevidence in _binq, True)
+    check("...and the instruction is to move back toward the anchor",
+          "move (g) back toward (f)" in _binq, True)
+    check("the institutional slippage rule is present",
+          "Institutions miss deadlines" in _binq, True)
+    # Whitespace-insensitive: these phrases wrap across lines in the prompt.
+    check("...naming the classes that actually cost us",
+          all(bool(_re.search(x.replace(" ", r"\s+"), _binq))
+              for x in ("introduced a bill", "begun formal talks",
+                        "crossed a reporting threshold")), True)
+    # The check is last. If the adversarial read came after it, the model would
+    # re-open the case for YES — the ordering bug already made once on numeric.
+    check("the status quo check comes AFTER the adversarial criteria read",
+          _binq.index("STATUS QUO CHECK") > _binq.index("read the resolution criteria adversarially"), True)
+    check("...and after the Yes/No scenarios",
+          _binq.index("STATUS QUO CHECK") > _binq.index("results in a Yes outcome"), True)
+    # NOT just "before the answer line" — that was trivially true while the
+    # rationale paragraph and the conditional disclaimer sat BETWEEN the check and
+    # the answer, letting the model re-argue itself back up after checking. The
+    # block must come after the rationale, immediately before the answer.
+    check("...and is genuinely the last block before the final answer",
+          _binq.index("good forecasters put extra weight")
+          < _binq.index("STATUS QUO CHECK")
+          < _binq.index('"Probability: ZZ%"'), True)
+    check("...with nothing between it and the answer but its own text",
+          _binq.index('"Probability: ZZ%"') - _binq.index("Momentum in the news") < 200, True)
+    check("the final-answer line is not duplicated",
+          _binq.count("The last thing you write is your final answer"), 1)
+    # DELIBERATELY MINIMAL. If this is ever measured, the mover must be knowable.
+    check("the lettered list was NOT reordered",
+          _binq.index("(d) A brief description of a scenario that results in a No outcome.")
+          < _binq.index("(e) A brief description of a scenario that results in a Yes outcome."), True)
+
+    # NEW HAZARD CREATED BY THE ABOVE: (f) is a probability stated as a number
+    # immediately before the answer — the likeliest thing for a cheap parser to
+    # lift by mistake. Caught before any run.
+    # BLOCKER, caught by audit before any run. The parser was told "the answer is
+    # (g)" — but (h) exists to REVISE (g) downward, so on exactly the questions
+    # edit 30 corrects, the parser was pointed at the PRE-correction number. The
+    # edit inverted itself, and since it newly invites a high (g) before the
+    # walk-back it could have published higher than before.
+    check("the parser is warned off the status quo anchor",
+          "STATUS QUO ANCHOR at (f)" in src, True)
+    check("...and off the working figure at (g) as well",
+          "the working figure at (g)" in src, True)
+    check("...it is told the FINAL line is authoritative",
+          'The answer is ALWAYS the final "Probability:" line' in src, True)
+    check("...and that (h) may revise (g)",
+          bool(_re.search(r"state a figure at \(g\) and then REVISE it at \(h\)", src)), True)
+    check("...and it is NEVER told to take (g)",
+          "the answer is (g)" in src, False)
+
+    print("\n  -- multiple choice: the floor went on the option that resolved --")
+    # 4 questions, -139.6, avg -34.91. Both big losses were the nothing-happened
+    # option sitting at our 0.01 floor: "Rank 21 or lower" (-129.9) and "No public
+    # S-1 filed yet" (-31.8). Same defect as the binary one, different shape.
+    _mcq = src[src.index("async def _run_forecast_on_multiple_choice"):
+               src.index("async def _multiple_choice_prompt_to_forecast")]
+    check("the MC prompt makes the model NAME the status quo option",
+          "the status quo option" in _mcq and "Name it exactly as it appears" in _mcq, True)
+    check("...describing how to recognise it",
+          all(x in _mcq for x in ("lowest band", "none of the", "present state")), True)
+    # Decimals, not percentages: the MC answer format is probabilities summing to
+    # 1, and unlike binary its parsing instruction has no percent-to-decimal rule.
+    check("...and floors it at 0.10, in the units the path actually uses",
+          "at least 0.10" in _mcq, True)
+    check("...with no percent signs introduced into a decimal prompt",
+          bool(_re.search(r"\d%", _mcq)), False)
+    # An upper bound or a hedge would make the floor advisory; both survived an
+    # earlier mutation sweep undetected.
+    check("...and the floor is a floor, not a range",
+          bool(_re.search(r"at least 0\.10[^.]*at most", _mcq)), False)
+    check("...and is not hedged into an opinion",
+          bool(_re.search(r"at least 0\.10[^.]*(if you think|where reasonable|where you think)", _mcq)), False)
+    check("...(d) resolves (b) onto the option list rather than asking twice",
+          "Restate (b) as ONE OF THE LISTED OPTIONS" in _mcq, True)
+    # Written as a whitespace-insensitive check on purpose: the phrase wraps
+    # across a line in the prompt, and embedding that newline in this file is the
+    # exact bug that broke the build on 1 Sept and again just now.
+    check("...with completed evidence the only way below that",
+          bool(_re.search(r"completed, dated,\s+verifiable event has ALREADY ruled it out", _mcq)), True)
+    check("...and 1% reserved for the genuinely impossible",
+          "genuinely impossible" in _mcq, True)
+    # It must not contradict the parser rule it cannot see.
+    # Robust, not literal: "0.01 minimum listed below" restored the defect while
+    # the old literal check stayed green. The forecaster never sees the parsing
+    # instruction, so the prompt must not point at anything "below".
+    check("the prompt does not refer to a rule the forecaster never sees",
+          bool(_re.search(r"(minimum|floor|rule)[^.]{0,30}below", _mcq)), False)
+    check("the parser still refuses a literal zero",
+          "NEVER emit exactly 0" in src, True)
+
+    # No duplicate letters in either lettered list. Two mutations relettering a
+    # step to collide with an existing one survived the earlier sweep.
+    for _label, _span in (("binary", _binq), ("multiple choice", _mcq)):
+        _letters = _re.findall(r"^\s{12}\(([a-h])\) ", _span, _re.MULTILINE)
+        check(f"the {_label} lettered list has no duplicates",
+              len(_letters) == len(set(_letters)), True)
+        check(f"...and no gaps in the {_label} sequence",
+              _letters == sorted(_letters), True)
+
     print("\n  -- the binary parser fills a DECIMAL field --")
     # BLOCKER, caught by audit 21 Sept 2026 before any paid run. The first
     # version of the binary parsing instruction said "as a percentage from 0 to
@@ -1170,7 +1308,7 @@ def run():
     # Mutation survivors, fourth audit pass: the suite asserted these bullets
     # EXISTED but never what they SAID, so reversing their meaning stayed green.
     check("...the parser takes the FINAL answer, not the first",
-          "Take the percentage the text gives as its FINAL answer" in _binpath, True)
+          'The answer is ALWAYS the final "Probability:" line' in _binpath, True)
     check("...the hatch says use the value unchanged",
           "use that value unchanged" in _binpath, True)
     check("...and the sub-1% conversion is stated correctly",
