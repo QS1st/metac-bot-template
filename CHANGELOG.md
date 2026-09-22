@@ -12,6 +12,87 @@ different bot.
 
 ---
 
+## 2026-09-22 (later) — the researcher was telling the forecaster the answer
+
+Two audits were asked to attack a pair of *decisions* rather than code — whether
+to trim the bot's reasoning steps, and whether to change the sample count. Both
+decisions survived. Neither of the arguments I made for them did, and one audit
+found something upstream of everything either decision was about.
+
+### Edit 32 — the research prompt
+
+Upstream asks the research model for a rundown of the news **"including if the
+question would resolve Yes or No based on current information"**, and that verdict
+reaches the forecaster under the heading *"Your research assistant says:"* —
+authoritative framing, delivered before any reasoning step runs.
+
+Set that beside the measurement. All five of the confident binary failures were
+institutional questions — a bill introduced, coalition talks begun, an agency
+announcing a date, a reporting threshold crossed — and each had fresh coverage of
+an announcement. A news-search model asked *"would this resolve Yes?"* on the day
+a bill is announced says yes. The forecaster then argues with an assistant it has
+been told to trust.
+
+The bot already carried a patch for the symptom. Edit 2 added *"If your research
+appears to show the outcome is already settled, treat that as a warning sign
+rather than a conclusion"* to the binary prompt — a warning bolted on downstream
+while the instruction causing the problem sat untouched upstream. That guard
+stays; the cause is now removed.
+
+The researcher is instead asked for dated, sourced facts with the date of each,
+and — the thing nothing was providing and the status quo check needs — **which
+steps the question depends on have not yet happened as of today**, keeping an
+announcement, a plan, a draft or a stated intention clearly separate from the
+thing having been done. It is told plainly that the Yes/No judgement is not its
+to make. `run_research` is shared, so this reaches every question type.
+
+### One anchor, not two
+
+Item (b) said of the base rate *"treat that rate as your starting anchor"*; item
+(f), eleven lines later, said of the status quo *"That is your anchor."* Two
+instructions, the same word, different numbers. A model resolves that by taking
+whichever sits nearer the answer it already prefers — on an institutional
+question with fresh news, the rate it just reverse-engineered. (b) is now the
+reference-class rate, named as evidence, and still stated as a number; (f) owns
+the word.
+
+### What the audits corrected in my reasoning, recorded because it matters
+
+**On the reasoning steps.** The right answer was to keep them, for a reason I had
+not identified: the adversarial read is what emits the `AMBIGUITY: LOW/HIGH`
+line, which `caps_for_reasoning` parses to set the clamp. Deleting it is not a
+prompt trim, it is a code change with a fail-quiet path — the function would log
+"no flag found" and return normal caps. All three reasons I actually gave were
+defensive, and one was incoherent: it acted on r = −0.26 while treating r = −0.07
+from the same self-selected n≈42 survey as proof of safety. Both are noise.
+
+**On the aggregation.** The decision to log rather than change stands, but the
+arithmetic behind it was wrong. `gmp` includes our own forecast, so holding it
+fixed and substituting a counterfactual is biased — about 1.3 peer points a
+question at n = 40, and 17 on a small field. It is also unnecessary: the
+counterfactual *difference* is `100 × ln(p′/p)` and the field term cancels
+entirely. Logged samples and the resolution are sufficient.
+
+Three further corrections to that plan: `required_successful_predictions` does
+not exist in 0.2.92 — one surviving sample is enough, so single-sampling forfeits
+far more often than assumed; a forfeited question scores zero, which is *above*
+our −6.30 average, so cutting samples could flatter the headline for reasons
+unrelated to forecasting; and because a logged sample exists only if it parsed,
+the logs must record parse **failures** too or any median-of-one reconstruction
+will be conditioned on survival. The better use of those logs is the aggregation
+*rule* — median, mean, geometric mean of odds, trimmed mean — not the count.
+
+**Standing caution, from the same audits.** The causal story here rests on five
+failed questions, sorted into "institutional" after the fact. That is the same
+sample-size complaint levelled at the survey's n ≈ 42, applied to n = 5. The
+season is being entered to test it, not to confirm it.
+
+### Verification
+
+Build byte-identical from verified upstream, 38 edits, **351 checks pass**, five
+fresh mutations of these two changes each caught. Nothing run against a live
+question.
+
 ## 2026-09-22 — the status quo check: the first change aimed at a MEASURED defect
 
 Everything before this was aimed at defects found by reading code. This one is

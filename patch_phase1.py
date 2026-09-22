@@ -108,9 +108,10 @@ replace(
 
             Then write:
             (a) The time left until the outcome to the question is known.
-            (b) The base rate: how often outcomes of this general kind occur over a
-                comparable period. State the reference class you are using and the
-                numbers behind it, then treat that rate as your starting anchor.
+            (b) The reference-class rate: how often outcomes of this general kind
+                occur over a comparable period. Name the reference class, give the
+                numbers behind it, and state the rate as a number. It is evidence,
+                not your anchor - the status quo check below owns that word.
             (c) The status quo outcome if nothing changed.
             (d) A brief description of a scenario that results in a No outcome.
             (e) A brief description of a scenario that results in a Yes outcome.
@@ -1330,6 +1331,46 @@ replace(
                 for an option that is genuinely impossible, not for one that is
                 merely dull.""",
     "multiple-choice prompt: name and protect the status quo option",
+)
+
+# ---------------------------------------------------------------------------
+# 32. THE RESEARCHER WAS TOLD TO PRE-JUDGE THE ANSWER  (22 Sept 2026)
+#
+#     Found by an audit asked to attack a DIFFERENT decision, which is how the
+#     best findings arrive.
+#
+#     Upstream's research prompt asks for a rundown of the news "including if the
+#     question would resolve Yes or No based on current information". That verdict
+#     is then handed to the forecaster under the heading "Your research assistant
+#     says:" - an authoritative framing, delivered BEFORE any reasoning step runs.
+#
+#     Now put that next to the measured defect. Of 25 scored binary questions, the
+#     bot's <=50% book was well calibrated (24% stated, 20% resolved YES) and its
+#     >50% book was not (71% stated, 50% resolved). All five confident failures
+#     were INSTITUTIONAL - a bill introduced, coalition talks begun, an agency
+#     announcing a date, a reporting threshold crossed - and each had fresh news
+#     coverage of an announcement. A news-search model asked "would this resolve
+#     Yes?" on the day a bill is announced says yes. The forecaster then spends
+#     the rest of the prompt arguing with an assistant it has been told to trust.
+#
+#     The bot already carried a patch for the SYMPTOM: edit 2 added "If your
+#     research appears to show the outcome is already settled, treat that as a
+#     warning sign rather than a conclusion" to the binary prompt. A warning was
+#     bolted on downstream while the instruction generating the problem was left
+#     in place upstream. This removes the cause.
+#
+#     It also asks for the thing the status quo check needs and nobody was
+#     providing: what has NOT yet happened, as of today, with dates.
+#
+#     Applies to every question type, since run_research is shared.
+# ---------------------------------------------------------------------------
+replace(
+    """                To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
+                You do not produce forecasts yourself.""",
+    """                To be a great assistant, you generate a concise but detailed rundown of the most relevant news. Report DATED, SOURCED facts and give the date of each one.
+                State explicitly which of the steps this question depends on have NOT yet happened as of today, and keep an announcement, a plan, a draft, a scheduled meeting or a stated intention clearly separate from the thing itself having been done.
+                You do not produce forecasts yourself, and you do not say whether the question would resolve Yes or No. That judgement belongs to the forecaster, and stating it here biases them.""",
+    "researcher: report dated facts and what has NOT happened, never a verdict",
 )
 
 DST.write_text(text, encoding="utf-8")

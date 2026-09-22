@@ -1129,6 +1129,46 @@ def run():
     check("the numeric flag does not match the binary one",
           flag("AMBIGUITY: HIGH"), None)
 
+    _binq = src[src.index("async def _run_forecast_on_binary"):
+                src.index("async def _binary_prompt_to_forecast")]
+
+    print("\n  -- the researcher does not pre-judge the answer --")
+    # Upstream asked the research model for a rundown "including if the question
+    # would resolve Yes or No based on current information", and handed that
+    # verdict to the forecaster as "Your research assistant says:". All five of
+    # our confident binary failures were institutional questions with fresh
+    # announcement coverage — exactly what a news model asked "would this resolve
+    # Yes?" says yes to. Found by an audit aimed at a different question.
+    _res = src[src.index("async def run_research"):src.index("##################################### BINARY")]
+    check("the researcher is NOT asked whether it would resolve Yes or No",
+          "including if the question would resolve Yes or No" in _res, False)
+    check("...and is told plainly that the verdict is not its job",
+          "you do not say whether the question would resolve Yes or No" in _res, True)
+    check("...it is asked for dated, sourced facts",
+          "DATED, SOURCED facts" in _res, True)
+    check("...and for what has NOT happened yet, which the status quo check needs",
+          bool(_re.search(r"have NOT yet happened as of today", _res)), True)
+    check("...keeping intent separate from completion",
+          bool(_re.search(r"a stated intention clearly separate from the thing itself", _res)), True)
+    # The downstream patch for the same symptom stays: research can still mislead
+    # without a verdict attached.
+    check("the still-open guard downstream is retained",
+          "STILL OPEN and has NOT yet resolved" in src, True)
+
+    print("\n  -- one anchor, not two --")
+    # (b) said "treat that rate as your starting anchor" and (f), eleven lines
+    # later, said "That is your anchor." Two instructions, same word, different
+    # numbers. A model resolves that by picking whichever is nearer the answer it
+    # already prefers. Audit, 22 Sept 2026.
+    check("only the status quo check claims the word anchor",
+          len(_re.findall(r"is your anchor", _binq)), 1)
+    check("...and the reference-class rate is named as evidence instead",
+          "It is evidence,\n                not your anchor" in _binq, True)
+    check("...(b) is no longer called the base rate's anchor",
+          "treat that rate as your starting anchor" in _binq, False)
+    check("...and still asks for a number",
+          "state the rate as a number" in _binq, True)
+
     print("\n  -- the status quo check: the measured fix, 22 Sept 2026 --")
     # MEASURED over 59 scored questions. The low half of our binary book was well
     # calibrated (said 24%, delivered 20%); the high half said 71% and delivered
@@ -1137,8 +1177,6 @@ def run():
     # questions. The bot's own comments show it naming the status quo correctly
     # and then overriding it on momentum: q45527 "(c) Status quo outcome: NO",
     # forecast 86%, resolved NO, -80.9.
-    _binq = src[src.index("async def _run_forecast_on_binary"):
-                src.index("async def _binary_prompt_to_forecast")]
     check("the binary prompt runs a status quo check", "STATUS QUO CHECK" in _binq, True)
     check("...it asks for the anchor as a NUMBER, not a narrative",
           "probability implied by the status quo simply continuing" in _binq, True)

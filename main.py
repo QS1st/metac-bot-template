@@ -1274,8 +1274,9 @@ class SummerTemplateBot2026(ForecastBot):
                 f"""
                 You are an assistant to a superforecaster.
                 The superforecaster will give you a question they intend to forecast on.
-                To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
-                You do not produce forecasts yourself.
+                To be a great assistant, you generate a concise but detailed rundown of the most relevant news. Report DATED, SOURCED facts and give the date of each one.
+                State explicitly which of the steps this question depends on have NOT yet happened as of today, and keep an announcement, a plan, a draft, a scheduled meeting or a stated intention clearly separate from the thing itself having been done.
+                You do not produce forecasts yourself, and you do not say whether the question would resolve Yes or No. That judgement belongs to the forecaster, and stating it here biases them.
 
                 Question:
                 {question.question_text}
@@ -1393,9 +1394,10 @@ class SummerTemplateBot2026(ForecastBot):
 
             Then write:
             (a) The time left until the outcome to the question is known.
-            (b) The base rate: how often outcomes of this general kind occur over a
-                comparable period. State the reference class you are using and the
-                numbers behind it, then treat that rate as your starting anchor.
+            (b) The reference-class rate: how often outcomes of this general kind
+                occur over a comparable period. Name the reference class, give the
+                numbers behind it, and state the rate as a number. It is evidence,
+                not your anchor - the status quo check below owns that word.
             (c) The status quo outcome if nothing changed.
             (d) A brief description of a scenario that results in a No outcome.
             (e) A brief description of a scenario that results in a Yes outcome.
