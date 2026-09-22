@@ -59,6 +59,11 @@ import json  # noqa: E402
 # repository variable. Not imported upstream either; same failure mode.
 import os  # noqa: E402
 
+# Used by _subquestion_arm. sha256 rather than the builtin hash(), which is
+# randomised per process by PYTHONHASHSEED - the same question would land in a
+# different arm on every run and the A/B would measure nothing.
+import hashlib  # noqa: E402
+
 # Counts questions forecast with little or no research, so the run can be
 # failed at the end rather than only logged. See the check near the bottom of
 # the file. Module-level because run_research is a method on the bot and the
@@ -1292,31 +1297,13 @@ class SummerTemplateBot2026(ForecastBot):
                 """
             )
 
-            if isinstance(researcher, GeneralLlm):
-                research = await researcher.invoke(prompt)
-            elif (
-                researcher == "asknews/news-summaries"
-                or researcher == "asknews/deep-research/low-depth"
-                or researcher == "asknews/deep-research/medium-depth"
-                or researcher == "asknews/deep-research/high-depth"
-            ):
-                research = await AskNewsSearcher().call_preconfigured_version(
-                    researcher, prompt
-                )
-            elif researcher.startswith("smart-searcher"):
-                model_name = researcher.removeprefix("smart-searcher/")
-                searcher = SmartSearcher(
-                    model=model_name,
-                    temperature=0,
-                    num_searches_to_run=2,
-                    num_sites_per_search=10,
-                    use_advanced_filters=False,
-                )
-                research = await searcher.invoke(prompt)
-            elif not researcher or researcher == "None" or researcher == "no_research":
-                research = ""
-            else:
-                research = await self.get_llm("researcher", "llm").invoke(prompt)
+            research = await self._invoke_researcher(researcher, prompt)
+            # Measured BEFORE enrichment. The subquestion block's own headers
+            # clear the emptiness threshold on their own, so checking the
+            # enriched string would mean half the season could never raise the
+            # alarm at all.
+            base_research_chars = len(research.strip())
+            research = await self._add_subquestion_research(question, research)
             # Nothing anywhere checked that research actually returned
             # anything. If Sonar returns an empty string or a refusal rather
             # than raising, the prompt reads "Your research assistant says:"
@@ -1331,7 +1318,7 @@ class SummerTemplateBot2026(ForecastBot):
             # scoring rule, and it is recorded as an open decision rather than
             # settled quietly here.
             if self.get_llm("researcher") not in (None, "", "None", "no_research"):
-                if len(research.strip()) < 200:
+                if base_research_chars < 200:
                     global EMPTY_RESEARCH_COUNT
                     EMPTY_RESEARCH_COUNT += 1
                     logger.error(
@@ -1341,6 +1328,109 @@ class SummerTemplateBot2026(ForecastBot):
                         len(research.strip()),
                     )
             logger.info(f"Found Research for URL {question.page_url}:\n{research}")
+            return research
+
+    async def _invoke_researcher(self, researcher, prompt: str) -> str:
+        """Upstream's dispatch, lifted verbatim so two callers can share it."""
+        if isinstance(researcher, GeneralLlm):
+            return await researcher.invoke(prompt)
+        if researcher in (
+            "asknews/news-summaries",
+            "asknews/deep-research/low-depth",
+            "asknews/deep-research/medium-depth",
+            "asknews/deep-research/high-depth",
+        ):
+            return await AskNewsSearcher().call_preconfigured_version(researcher, prompt)
+        if isinstance(researcher, str) and researcher.startswith("smart-searcher"):
+            searcher = SmartSearcher(
+                model=researcher.removeprefix("smart-searcher/"),
+                temperature=0,
+                num_searches_to_run=2,
+                num_sites_per_search=10,
+                use_advanced_filters=False,
+            )
+            return await searcher.invoke(prompt)
+        if not researcher or researcher in ("None", "no_research"):
+            return ""
+        return await self.get_llm("researcher", "llm").invoke(prompt)
+
+    async def _add_subquestion_research(self, question, research: str) -> str:
+        """Half the questions get their subquestions researched. See
+        _subquestion_arm for why the assignment is a hash and not a coin."""
+        in_arm = _subquestion_arm(getattr(question, "id_of_question", None))
+        _telemetry(
+            q=getattr(question, "id_of_question", None),
+            url=getattr(question, "page_url", None),
+            kind=type(question).__name__,
+            phase="research",
+            subquestion_arm=in_arm,
+            base_chars=len(research or ""),
+        )
+        if not in_arm:
+            return research
+        try:
+            asked = await self._invoke_default_llm(
+                clean_indents(
+                    f"""
+                    A superforecaster is about to forecast the question below.
+                    Name the 2 to 3 SUBQUESTIONS whose answers would most change
+                    that forecast - the things that must be true, the steps that
+                    must have been completed, the figures the outcome turns on.
+
+                    Each must be answerable from news or public data, and must be
+                    narrower than the question itself. Do not answer them. Do not
+                    say what you think the outcome will be.
+
+                    Write one per line, nothing else, no numbering.
+
+                    Question:
+                    {question.question_text}
+
+                    Resolution criteria:
+                    {question.resolution_criteria}
+                    """
+                )
+            )
+            subquestions = [
+                line.strip(" -*\t")
+                for line in (asked or "").splitlines()
+                if len(line.strip(" -*\t")) > 15
+                and not line.strip().endswith(":")
+            ][:2]
+            if not subquestions:
+                logger.info("Subquestion arm: none generated for %s", question.page_url)
+                return research
+            researcher = self.get_llm("researcher")
+            findings = []
+            for sub in subquestions:
+                answer = await self._invoke_researcher(
+                    researcher,
+                    clean_indents(
+                        f"""
+                        Report DATED, SOURCED facts bearing on this question, with
+                        the date of each. Say plainly what has NOT yet happened.
+                        Do not forecast and do not state an expected outcome.
+
+                        {sub}
+                        """
+                    ),
+                )
+                findings.append(f"### {sub}\n{answer}")
+            _telemetry(
+                q=getattr(question, "id_of_question", None),
+                kind=type(question).__name__,
+                phase="subquestions",
+                asked=subquestions,
+                added_chars=sum(len(f) for f in findings),
+            )
+            return (
+                f"{research}\n\n"
+                "## Subquestion research\n"
+                "The following were researched separately because their answers "
+                "bear on the question above.\n\n" + "\n\n".join(findings)
+            )
+        except Exception as exc:  # enrichment must never cost the main research
+            logger.warning("Subquestion research failed for %s: %s", question.page_url, exc)
             return research
 
     ##################################### BINARY QUESTIONS #####################################
@@ -2088,6 +2178,33 @@ def _scoring_grid_message(question) -> str:
 
 
 TELEMETRY_MARKER = "IBJ-TELEMETRY"
+
+
+def _subquestion_arm(question_id) -> bool:
+    """Deterministically assign a question to the subquestion-research arm.
+
+    Half the season gets subquestion research, half does not, and the season is
+    then a true A/B rather than a before-and-after against a different set of
+    questions. Spring 2026 put "researches subquestions" at r = +0.24 on n = 41,
+    q = 0.475 - a hypothesis, not a finding, which is exactly what deserves a
+    controlled test rather than adoption on faith.
+
+    STABLE BY CONSTRUCTION. sha256 of the question id, not Python's builtin
+    hash(), which is salted per process: the same question retried in a later
+    run would land in the other arm and both arms would be polluted. It also
+    means the assignment can be recomputed months later from the id alone,
+    without trusting the logs.
+
+    Fails to the CONTROL arm, never to the treatment: an unreadable id must not
+    quietly spend money on an experiment it cannot record.
+    """
+    try:
+        if not isinstance(question_id, (int, str)) or question_id == "":
+            return False
+        digest = hashlib.sha256(f"subq:{question_id}".encode("utf-8")).hexdigest()
+        return int(digest[:8], 16) % 2 == 1
+    except Exception:
+        return False
 
 
 def _telemetry(**fields) -> None:

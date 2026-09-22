@@ -12,6 +12,90 @@ different bot.
 
 ---
 
+## 2026-09-22 (fourth) — subquestion research, randomised, and the alarm it nearly switched off
+
+Spring 2026 puts *"researches subquestions"* at r = +0.24, q = 0.475, n = 41, on
+a sample where 62% of respondents won a prize against 28% of the field. That is a
+hypothesis. So **half the season gets it and half does not**, assigned by sha256
+of the question id — not Python's builtin `hash()`, which is salted per process,
+so the same question retried in a later run would land in the other arm and
+pollute both. The assignment can be recomputed months later from the id alone,
+without trusting a log. It fails to the **control** arm, never to treatment: an
+unreadable id must not quietly spend money on an experiment it cannot record.
+
+An in-arm question generates two subquestions and researches each through the
+same researcher, appended under its own heading. Failure returns the original
+research untouched — this is enrichment, not a forecast.
+
+Upstream's five-branch researcher dispatch has been lifted verbatim into
+`_invoke_researcher` so both callers share it and the branches cannot drift. It
+is behaviourally identical on every branch, with one accidental improvement: a
+`None` researcher crashed upstream on `None.startswith` and now returns an empty
+string.
+
+### The blocker: it would have switched off the empty-research alarm
+
+The subquestion block is appended to `research` **before** the emptiness check
+reads it, and the block's own headers clear the 200-character threshold unaided —
+262 characters even when every research call returns nothing.
+
+So under a total research outage: control questions all trip the counter, in-arm
+questions structurally cannot, and the failure rate lands at almost exactly 0.5
+against a `> 0.5` test. The single alarm standing between four unattended months
+and a bot forecasting from model weights while exiting green, silenced by a
+boundary condition. The base length is now captured before enrichment and the
+alarm reads that.
+
+### And the one that would have cost questions rather than points
+
+Three serial sub-research calls plus a generation call, all inside the three-slot
+concurrency limiter, take a 40-question batch from roughly 28 minutes to 35
+against what was then a 30-minute kill. A killed run loses most of a batch rather
+than a tail of it, and `cancel-in-progress: false` means the next two crons are
+swallowed too. Missed questions cost far more than any research gain.
+
+Two subquestions now, not three, and the workflow timeout goes to **40 minutes**.
+Questions stay open 1.5 to 3 hours, so even a full-length run leaves two to four
+attempts at each one.
+
+That also removes a subtler problem: a timeout kill was **not independent of
+arm**, since in-arm questions sit in the research stage ~4.5× longer. The
+treatment arm would have lost its slowest questions preferentially — survivorship
+bias flattering the treatment, in the one season run to measure it.
+
+### Cost, corrected
+
+The measured role split is more forecasting-heavy than assumed: forecasting 88%,
+research 10%, parsing 2%. Extra per in-arm question is a generation call, two
+Sonar calls, and a longer research text feeding all five prediction prompts —
+roughly $0.034 to $0.059, or **+$0.017 to $0.030 averaged over the 50/50 split**.
+That is **$28 to $33 at 350 questions**, with a worst case nearer **$40–50** once
+retry amplification and unpacked group questions are allowed for. `preflight_check_balance`
+only logs; the OpenRouter daily cap is the real backstop.
+
+### Fourteen of seventeen mutations survived the first sweep
+
+The new tests pinned structure — call-site counts, argument names, the ordering
+of two source indices — while `_invoke_researcher` and `_add_subquestion_research`
+had no behavioural coverage at all. Dropping an AskNews variant from the dispatch
+tuple sent that researcher silently down the generic branch and passed 395
+checks. So did swapping the two research calls in `run_research`, which discards
+every subquestion call's spend and its result.
+
+Now covered: every dispatch branch by name, the order of the two research calls,
+the base-length capture, the arm's join key and that nothing else conditions it,
+`q=question.id_of_question` on all four sample paths, the per-finding heading, the
+subquestion line filter's length floor and colon rule, the caps on the binary
+line, and two more decoration cases for the status-quo regex. Eight fresh
+mutations run afterwards, all caught.
+
+### Verification
+
+Build byte-identical from verified upstream, 41 edits, `main.py` parses,
+`__main__` runs to the last line, no unreachable code, **421 checks pass**.
+`id_of_question` confirmed present on `MetaculusQuestion` in 0.2.92. Nothing run
+against a live question.
+
 ## 2026-09-22 (third) — one telemetry line per sample
 
 The season is being entered to **measure**, with several changes shipping

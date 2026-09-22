@@ -9,6 +9,7 @@ Run:  python3 test_phase1.py
 """
 
 import ast
+import hashlib as _hashlib
 import json as _json
 import os as _os
 import pathlib
@@ -35,6 +36,7 @@ def load(*names, consts=()):
     module.re = _re
     module.os = _os
     module.json = _json
+    module.hashlib = _hashlib
     module.datetime, module.timezone = _datetime, _timezone
     module.logger = types.SimpleNamespace(
         info=lambda *a, **k: None,
@@ -1134,13 +1136,134 @@ def run():
     _binq = src[src.index("async def _run_forecast_on_binary"):
                 src.index("async def _binary_prompt_to_forecast")]
 
+    print("\n  -- the empty-research alarm reads the BASE research --")
+    # BLOCKER, audit 22 Sept 2026. The subquestion block is appended before the
+    # alarm reads the string, and its own headers clear 200 characters unaided.
+    # Under a total research outage, control questions would all trip the
+    # counter and in-arm questions structurally could not — a failure rate of
+    # almost exactly 0.5 against a "> 0.5" test. The one alarm standing between
+    # four unattended months and a bot forecasting from model weights while
+    # exiting green, silenced by a boundary condition.
+    _rr = src[src.index("async def run_research"):src.index("##################################### BINARY")]
+    check("the base length is captured before enrichment",
+          _rr.index("base_research_chars = len(research.strip())")
+          < _rr.index("_add_subquestion_research"), True)
+    check("...and the alarm tests that, not the enriched string",
+          "if base_research_chars < 200:" in _rr, True)
+    check("...the enriched string is never length-tested",
+          bool(_re.search(r"len\(research\.strip\(\)\) < 200", _rr)), False)
+    check("base research is fetched BEFORE the subquestion pass",
+          _rr.index("self._invoke_researcher(researcher, prompt)")
+          < _rr.index("self._add_subquestion_research(question, research)"), True)
+
+    print("\n  -- the researcher dispatch, on every branch --")
+    # 14 of 17 audit mutations survived because _invoke_researcher and
+    # _add_subquestion_research had NO coverage beyond call-site counts.
+    # Dropping an AskNews variant from the tuple sends that researcher silently
+    # down the generic branch.
+    _disp = src[src.index("async def _invoke_researcher"):src.index("async def _add_subquestion_research")]
+    for _needed in ("asknews/news-summaries", "asknews/deep-research/low-depth",
+                    "asknews/deep-research/medium-depth", "asknews/deep-research/high-depth"):
+        check(f"the dispatch still routes {_needed}", _needed in _disp, True)
+    check("...GeneralLlm is checked first, before any string comparison",
+          _disp.index("isinstance(researcher, GeneralLlm)") < _disp.index("asknews/news-summaries"), True)
+    check("...smart-searcher is isinstance-guarded, unlike upstream",
+          'isinstance(researcher, str) and researcher.startswith("smart-searcher")' in _disp, True)
+    check("...the no-research sentinels return an empty string",
+          bool(_re.search(r'if not researcher or researcher in \("None", "no_research"\):', _disp)), True)
+    check("...with exactly one generic fallback",
+          _disp.count('self.get_llm("researcher", "llm").invoke(prompt)'), 1)
+    check("one dispatch, two callers", src.count("await self._invoke_researcher("), 2)
+
+    print("\n  -- subquestion research, randomised by a STABLE hash --")
+    # Spring 2026 put "researches subquestions" at r = +0.24, q = 0.475, n = 41,
+    # on a sample where 62% of respondents won a prize against 28% of the field.
+    # That is a hypothesis, so half the season gets it and half does not.
+    arm, _amod = load("_subquestion_arm", consts=())
+    _ids = list(range(45500, 45900))
+    _t = sum(1 for i in _ids if arm(i))
+    # NOT just "is it in range": a helper starved of hashlib returns False for
+    # everything through its own except, which reads as a 0% split. Assert both
+    # arms are populated first. That mistake was made here, twice today, in two
+    # different helpers.
+    check("both arms are actually populated", 0 < _t < len(_ids), True)
+    check("the split is near even over 400 ids", 0.40 < _t / len(_ids) < 0.60, True)
+    check("...and is stable across calls", all(arm(i) == arm(i) for i in _ids), True)
+    # THE WHOLE POINT. Python's builtin hash() is salted per process, so the same
+    # question retried in a later run would land in the other arm and pollute
+    # both. sha256 cannot do that, and the assignment can be recomputed months
+    # later from the id alone without trusting a log.
+    check("the assignment uses sha256, not the salted builtin hash",
+          "hashlib.sha256" in src and _re.search(r"hash\(f?\"subq", src) is None, True)
+    check("hashlib is imported at module level",
+          bool(_re.search(r"^import hashlib", src, _re.MULTILINE)), True)
+    # Fails to CONTROL, never to treatment: an unreadable id must not quietly
+    # spend money on an experiment it cannot record.
+    check("a missing id falls to control", arm(None), False)
+    check("...and an empty string", arm(""), False)
+    check("...and anything that is not an int or a str", arm(object()), False)
+    check("string ids are supported", isinstance(arm("fall-2026-q1"), bool), True)
+
+    _rs = src[src.index("async def _add_subquestion_research"):
+              src.index("##################################### BINARY QUESTIONS")]
+    check("the arm is logged for every question, both sides",
+          'phase="research"' in _rs and "subquestion_arm=in_arm" in _rs, True)
+    check("...before the early return, so control questions are recorded too",
+          _rs.index("subquestion_arm=in_arm") < _rs.index("if not in_arm:"), True)
+    check("the subquestions actually asked are logged",
+          'phase="subquestions"' in _rs and "asked=subquestions" in _rs, True)
+    # Two, not three. Audited arithmetic: a generation call plus three serial
+    # research calls inside the three-slot limiter pushed a 40-question batch
+    # from ~28 to ~35 minutes against what was then a 30-minute kill, and a
+    # killed run loses most of a batch rather than a tail of it.
+    check("at most two subquestions are researched", "][:2]" in _rs, True)
+    check("...and a preamble line ending in a colon is not one of them",
+          'not line.strip().endswith(":")' in _rs, True)
+    # A length floor as well as the colon rule: without it, a stray blank or a
+    # one-word line becomes a "subquestion" and buys a research call of its own.
+    # Survived the first sweep.
+    check("...and a line must be substantial to count at all",
+          bool(_re.search(r'len\(line\.strip\(" -\*.t"\)\) > 15', _rs)), True)
+    check("the subquestion researcher is asked for dated, sourced facts",
+          "DATED, SOURCED facts" in _rs, True)
+    check("...and each finding is headed by its own subquestion",
+          "### {sub}" in _rs, True)
+    # The join key. Everything downstream pairs the arm to the samples by
+    # question id; swapping one path to the url breaks the A/B silently.
+    check("the arm is keyed on the question id, not the url",
+          '_subquestion_arm(getattr(question, "id_of_question", None))' in _rs, True)
+    # Exact line: anything appended to it (a length test, a tier test) would
+    # confound the arm with the thing appended and quietly destroy the A/B.
+    check("...and nothing else conditions the arm",
+          '        in_arm = _subquestion_arm(getattr(question, "id_of_question", None))\n' in _rs, True)
+    for _p, _a, _b in (("binary", "async def _binary_prompt_to_forecast", "#### MULTIPLE CHOICE"),
+                       ("multiple choice", "async def _multiple_choice_prompt_to_forecast", "#### NUMERIC"),
+                       ("numeric", "async def _numeric_prompt_to_forecast", "#### DATE"),
+                       ("date", "async def _date_prompt_to_forecast", "def _create_upper_and_lower_bound_messages")):
+        _sp = src[src.index(_a):src.index(_b, src.index(_a))]
+        check(f"the {_p} line joins on q=question.id_of_question",
+              "q=question.id_of_question" in _sp, True)
+
+    check("the subquestion researcher is told not to forecast",
+          "do not state an expected outcome" in _rs, True)
+    # Additive enrichment, not a forecast: a failure here must cost only the
+    # subquestions.
+    check("a failure returns the ORIGINAL research",
+          bool(_re.search(r"except Exception as exc:.*?\n.*?logger\.warning.*?\n\s+return research", _rs, _re.S)), True)
+    check("...and both arms share one researcher dispatch, so they cannot drift",
+          src.count("async def _invoke_researcher") == 1
+          and _rs.count("self._invoke_researcher(") == 1, True)
+
     print("\n  -- telemetry: one line per sample, so the season is analysable --")
     # The season is being entered to MEASURE, with several changes shipping at
     # once. Without a per-sample record the analysis afterwards is archaeology.
     check("json is imported at module level, not swallowed by a comment",
           bool(_re.search(r"^import json", src, _re.MULTILINE)), True)
     check("the marker is a single greppable token", 'TELEMETRY_MARKER = "IBJ-TELEMETRY"' in src, True)
-    check("all four sample paths emit a line", src.count("        _telemetry("), 4)
+    # Four sample lines plus two from the research pass (the A/B arm, and the
+    # subquestions actually asked). The per-path loop below is what pins the
+    # four; this pins the total so a stray call cannot appear unnoticed.
+    check("six telemetry call sites, and no more", src.count("        _telemetry("), 6)
     for _fn, _end in (("_binary_prompt_to_forecast", "#### MULTIPLE CHOICE"),
                       ("_multiple_choice_prompt_to_forecast", "#### NUMERIC"),
                       ("_numeric_prompt_to_forecast", "#### DATE"),
@@ -1171,6 +1294,8 @@ def run():
           "sq_anchor=" in _bt and "sq_final=" in _bt, True)
     check("...and the pre-cap value, so the caps can be measured too",
           "raw=binary_prediction.prediction_in_decimal" in _bt, True)
+    check("...and the caps themselves, so their effect stays measurable",
+          "floor=floor" in _bt and "ceiling=ceiling" in _bt, True)
 
     # RUN them. Telemetry that raises costs a forecast, and a regex that misses
     # makes the season unanalysable — neither shows up in a source grep.
@@ -1196,6 +1321,9 @@ def run():
          "(f) 8%\n(g) 65%\n(h) cannot name a completed step, moving to 20%.", (8.0, 65.0)),
         ("prose around the numbers", "(f) status quo continuing: 12\n(g) final: 34", (12.0, 34.0)),
         ("markdown decoration", "**(f)** 5%\n**(g)** 9%", (5.0, 9.0)),
+        ("a bulleted pair, which a narrower class would miss",
+         "- (f) 5%\n- (g) 9%", (5.0, 9.0)),
+        ("a blockquoted pair", "> (f) 30\n> (g) 44", (30.0, 44.0)),
         ("the LAST of each letter wins", "(f) 10%\nrevised\n(f) 15%\n(g) 20%", (15.0, 20.0)),
         ("no pair at all", "no letters here", (None, None)),
         ("empty reasoning", "", (None, None)),
