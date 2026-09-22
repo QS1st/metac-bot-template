@@ -57,7 +57,7 @@ import os
 import statistics
 import sys
 
-from forecasting_tools import Benchmarker, MetaculusClient
+from forecasting_tools import ApiFilter, Benchmarker, MetaculusClient
 
 # main.py guards its own entry point, so importing it is safe and is proved so
 # by the import-check job in tests.yaml on every push.
@@ -140,10 +140,86 @@ def summarise(reports) -> None:
     print("=" * 72)
 
 
+def diagnose(client) -> int:
+    """Count what survives each filter, then exit. No model calls, no cost.
+
+    Run 1 fetched ZERO candidates, which could have been any of four filters or
+    the community prediction simply not being visible to this token. Guessing
+    would have meant a paid run per guess. This narrows it for nothing.
+
+    The decisive lines are the last ones: if questions come back but every
+    community_prediction_at_access_time is None, our token cannot see the
+    crowd's number and the approach is dead rather than misconfigured.
+    """
+    stages = [
+        ("open binary only", dict(allowed_statuses=["open"], allowed_types=["binary"])),
+        ("+ 30 or more forecasters", dict(
+            allowed_statuses=["open"], allowed_types=["binary"], num_forecasters_gte=30)),
+        ("+ community prediction exists", dict(
+            allowed_statuses=["open"], allowed_types=["binary"], num_forecasters_gte=30,
+            community_prediction_exists=True)),
+        ("+ bots excluded from aggregates", dict(
+            allowed_statuses=["open"], allowed_types=["binary"], num_forecasters_gte=30,
+            community_prediction_exists=True, includes_bots_in_aggregates=False)),
+    ]
+    print("\nFILTER DIAGNOSTIC. No forecasts are made and nothing is spent.\n")
+    for label, kwargs in stages:
+        try:
+            found = asyncio.run(
+                client.get_questions_matching_filter(
+                    ApiFilter(group_question_mode="exclude", **kwargs),
+                    num_questions=10,
+                    randomly_sample=True,
+                    error_if_question_target_missed=False,
+                )
+            )
+            print(f"  {len(found):3d}  {label}")
+        except Exception as exc:
+            print(f"  ERR  {label}: {type(exc).__name__}: {exc}")
+
+    try:
+        sample = asyncio.run(
+            client.get_questions_matching_filter(
+                ApiFilter(allowed_statuses=["open"], allowed_types=["binary"],
+                          num_forecasters_gte=30, group_question_mode="exclude"),
+                num_questions=5,
+                randomly_sample=True,
+                error_if_question_target_missed=False,
+            )
+        )
+    except Exception as exc:
+        print(f"\n  could not fetch a sample: {exc}")
+        return 1
+
+    print(f"\nCOMMUNITY PREDICTION VISIBILITY, on {len(sample)} question(s):")
+    if not sample:
+        print("  nothing came back at all, so the filters are the problem, not CP.")
+        return 0
+    for q in sample:
+        cp = getattr(q, "community_prediction_at_access_time", None)
+        shown = "None" if cp is None else f"{cp:.3f}"
+        print(f"  cp={shown}   slugs={getattr(q, 'tournament_slugs', None)}   {q.page_url}")
+    visible = sum(
+        1 for q in sample
+        if getattr(q, "community_prediction_at_access_time", None) is not None
+    )
+    print(
+        f"\n  {visible} of {len(sample)} carried a community prediction.\n"
+        "  If that is zero, this token cannot see the crowd's number and the\n"
+        "  benchmark cannot work as written."
+    )
+    return 0
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     parser = argparse.ArgumentParser(description="Benchmark the bot against the community prediction")
     parser.add_argument("--questions", type=int, default=25, help="how many to test on (default 25)")
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="count what survives each filter and exit. No model calls, no cost.",
+    )
     args = parser.parse_args()
 
     if not os.environ.get("METACULUS_TOKEN"):
@@ -163,6 +239,10 @@ def main() -> int:
     )
 
     client = MetaculusClient()
+
+    if args.diagnose:
+        return diagnose(client)
+
     wanted = args.questions
     candidates = client.get_benchmark_questions(
         wanted * OVERFETCH_FACTOR,
