@@ -26,12 +26,24 @@ jobs:
     # default, blocking every subsequent run and silently costing us a whole
     # afternoon of questions.
     #
-    # 30, not 20. Pacing at 8 calls/minute with no burst means ~7.5s between
-    # default-model calls, so five predictions is ~37s a question and a run
-    # tops out around 16 questions at 20 minutes. Questions are gathered
-    # concurrently and finish near the end, so a timeout kill loses most of the
-    # batch rather than a tail of it. Late still scores; killed does not.
-    timeout-minutes: 30
+    # 40 from 22 Sept 2026, was 30. Pacing at 8 calls/minute with no burst
+    # means ~7.5s between default-model calls, so five predictions is ~37s a
+    # question. Questions are gathered concurrently and finish near the end, so
+    # a timeout kill loses most of the batch rather than a tail of it. Late
+    # still scores; killed does not.
+    #
+    # WHY IT WENT UP. Subquestion research adds a generation call plus two
+    # research calls to half the questions, serially, inside the three-slot
+    # limiter. Audited arithmetic for a 40-question batch: the research stage
+    # goes from ~3.3 to ~7 minutes and the run from ~28 to ~32, which would
+    # have sat the other side of a 30-minute kill. Ten minutes of headroom
+    # costs nothing on a run that finishes early and buys the whole batch on
+    # one that does not.
+    #
+    # The cost is that a long run holds the concurrency group for longer
+    # against a 10-minute cron. Questions stay open 1.5-3 hours, so even a
+    # full-length run leaves two to four attempts at every question.
+    timeout-minutes: 40
     steps: # sets up the steps that will be run in order
       # setup repository with all necessary dependencies - keep as is
       - name: Check out repository
