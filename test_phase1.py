@@ -9,6 +9,7 @@ Run:  python3 test_phase1.py
 """
 
 import ast
+import json as _json
 import os as _os
 import pathlib
 import re as _re
@@ -33,6 +34,7 @@ def load(*names, consts=()):
     module = types.ModuleType("harness")
     module.re = _re
     module.os = _os
+    module.json = _json
     module.datetime, module.timezone = _datetime, _timezone
     module.logger = types.SimpleNamespace(
         info=lambda *a, **k: None,
@@ -1131,6 +1133,76 @@ def run():
 
     _binq = src[src.index("async def _run_forecast_on_binary"):
                 src.index("async def _binary_prompt_to_forecast")]
+
+    print("\n  -- telemetry: one line per sample, so the season is analysable --")
+    # The season is being entered to MEASURE, with several changes shipping at
+    # once. Without a per-sample record the analysis afterwards is archaeology.
+    check("json is imported at module level, not swallowed by a comment",
+          bool(_re.search(r"^import json", src, _re.MULTILINE)), True)
+    check("the marker is a single greppable token", 'TELEMETRY_MARKER = "IBJ-TELEMETRY"' in src, True)
+    check("all four sample paths emit a line", src.count("        _telemetry("), 4)
+    for _fn, _end in (("_binary_prompt_to_forecast", "#### MULTIPLE CHOICE"),
+                      ("_multiple_choice_prompt_to_forecast", "#### NUMERIC"),
+                      ("_numeric_prompt_to_forecast", "#### DATE"),
+                      ("_date_prompt_to_forecast", "def _create_upper_and_lower_bound_messages")):
+        _b = src[src.index(f"async def {_fn}"):src.index(_end, src.index(f"async def {_fn}"))]
+        check(f"{_fn} emits telemetry", "_telemetry(" in _b, True)
+        # On the SUCCESS path only. A sample that fails never reaches the line,
+        # which is how the parse-failure count falls out by subtraction without
+        # any exception handling around a forecast.
+        check(f"...{_fn} logs immediately before the return",
+              _b.index("_telemetry(") < _b.rindex("return ReasonedPrediction"), True)
+    # The date prompt never asks for a FIGURE AMBIGUITY flag, so logging one
+    # would fill a column with nulls and imply a question that was never put.
+    _dt = src[src.index("async def _date_prompt_to_forecast"):
+              src.index("def _create_upper_and_lower_bound_messages")]
+    check("the date line does not carry the numeric flag", "figure_ambiguity" in _dt, False)
+    # ...but the NUMERIC line must, since that prompt does ask for it and the
+    # whole point is to see whether the adversarial read is happening.
+    _nt = src[src.index("async def _numeric_prompt_to_forecast"):
+              src.index("##################################### DATE QUESTIONS")]
+    check("the numeric line carries the figure-ambiguity flag",
+          "figure_ambiguity=_figure_ambiguity_flag(reasoning)" in _nt, True)
+    check("...and every sample's percentiles, for the aggregation counterfactual",
+          "pc.percentile, pc.value" in _nt, True)
+    _bt = src[src.index("async def _binary_prompt_to_forecast"):
+              src.index("##################################### MULTIPLE CHOICE")]
+    check("the binary line carries the status quo pair",
+          "sq_anchor=" in _bt and "sq_final=" in _bt, True)
+    check("...and the pre-cap value, so the caps can be measured too",
+          "raw=binary_prediction.prediction_in_decimal" in _bt, True)
+
+    # RUN them. Telemetry that raises costs a forecast, and a regex that misses
+    # makes the season unanalysable — neither shows up in a source grep.
+    # TELEMETRY_MARKER must be lifted too: without it _telemetry raises NameError
+    # inside its own except and emits nothing, silently. Which is exactly what
+    # happened the first time this test was written.
+    tel, sqp, _tmod = load("_telemetry", "_status_quo_pair", consts=("TELEMETRY_MARKER",))
+    _emitted = []
+    _tmod.logger.info = lambda *a: _emitted.append(a[0] % a[1:] if len(a) > 1 else a[0])
+    tel(q=1, kind="BinaryQuestion", sample=0.31, sq_anchor=8.0, sq_final=65.0)
+    check("a line is emitted with the marker", _emitted[-1].startswith("IBJ-TELEMETRY "), True)
+    check("...and the payload is valid JSON",
+          _json.loads(_emitted[-1].split(" ", 1)[1])["sq_final"], 65.0)
+    # A tuple key defeats json's default=str and raises TypeError. object() does
+    # NOT — default=str absorbs it — so the first version of this check passed
+    # while the swallow was mutated to a re-raise. Mutation sweep, 22 Sept 2026.
+    check("an unserialisable payload does not raise",
+          raises(lambda: tel(q=2, sample={(1, 2): 3})), False)
+    check("...and the good line before it still got out", len(_emitted) >= 1, True)
+
+    for _label, _text, _want in (
+        ("the walk-back case, anchor and revised final",
+         "(f) 8%\n(g) 65%\n(h) cannot name a completed step, moving to 20%.", (8.0, 65.0)),
+        ("prose around the numbers", "(f) status quo continuing: 12\n(g) final: 34", (12.0, 34.0)),
+        ("markdown decoration", "**(f)** 5%\n**(g)** 9%", (5.0, 9.0)),
+        ("the LAST of each letter wins", "(f) 10%\nrevised\n(f) 15%\n(g) 20%", (15.0, 20.0)),
+        ("no pair at all", "no letters here", (None, None)),
+        ("empty reasoning", "", (None, None)),
+        ("None reasoning", None, (None, None)),
+    ):
+        check(f"status quo pair: {_label}", sqp(_text), _want)
+    check("...and rubbish returns None rather than raising", sqp(object()), (None, None))
 
     print("\n  -- the researcher does not pre-judge the answer --")
     # Upstream asked the research model for a rundown "including if the question

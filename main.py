@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 # build check added 31 Aug 2026, which is why that check exists.
 import re  # noqa: E402
 
+# Used by the telemetry line: one JSON object per sample, so a season of logs
+# can be parsed rather than read.
+import json  # noqa: E402
+
 # Used by resolve_seasonal_tournament() to read the AIB_TOURNAMENT_ID
 # repository variable. Not imported upstream either; same failure mode.
 import os  # noqa: E402
@@ -1462,6 +1466,19 @@ class SummerTemplateBot2026(ForecastBot):
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {decimal_pred}."
         )
+        _anchor, _final = _status_quo_pair(reasoning)
+        _telemetry(
+            q=question.id_of_question,
+            url=question.page_url,
+            kind=type(question).__name__,
+            sample=decimal_pred,
+            raw=binary_prediction.prediction_in_decimal,
+            floor=floor,
+            ceiling=ceiling,
+            sq_anchor=_anchor,
+            sq_final=_final,
+            chars=len(reasoning or ""),
+        )
         return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
 
     ##################################### MULTIPLE CHOICE QUESTIONS #####################################
@@ -1590,6 +1607,16 @@ class SummerTemplateBot2026(ForecastBot):
 
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}."
+        )
+        _telemetry(
+            q=question.id_of_question,
+            url=question.page_url,
+            kind=type(question).__name__,
+            sample={
+                option.option_name: option.probability
+                for option in predicted_option_list.predicted_options
+            },
+            chars=len(reasoning or ""),
         )
         return ReasonedPrediction(
             prediction_value=predicted_option_list, reasoning=reasoning
@@ -1748,6 +1775,14 @@ class SummerTemplateBot2026(ForecastBot):
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
         )
+        _telemetry(
+            q=question.id_of_question,
+            url=question.page_url,
+            kind=type(question).__name__,
+            sample=[(pc.percentile, pc.value) for pc in prediction.declared_percentiles],
+            figure_ambiguity=_figure_ambiguity_flag(reasoning),
+            chars=len(reasoning or ""),
+        )
         return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
 
     ##################################### DATE QUESTIONS #####################################
@@ -1850,6 +1885,13 @@ class SummerTemplateBot2026(ForecastBot):
         prediction.get_cdf()
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
+        )
+        _telemetry(
+            q=question.id_of_question,
+            url=question.page_url,
+            kind=type(question).__name__,
+            sample=[(pc.percentile, pc.value) for pc in prediction.declared_percentiles],
+            chars=len(reasoning or ""),
         )
         return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
 
@@ -2043,6 +2085,72 @@ def _scoring_grid_message(question) -> str:
         )
     except Exception:  # an advisory line must never kill a forecast
         return ""
+
+
+TELEMETRY_MARKER = "IBJ-TELEMETRY"
+
+
+def _telemetry(**fields) -> None:
+    """Emit one greppable JSON object per sample. NEVER raises.
+
+    WHY THIS EXISTS. The bot is about to run a season as a MEASUREMENT rather
+    than a bet, with several changes shipping together. Without a per-sample
+    record the post-season analysis is archaeology: one total, several causes,
+    no way to separate them. With one, the questions become arithmetic.
+
+    What it makes computable after the fact, for free:
+      - THE AGGREGATION RULE. Every sample value is here, so median-of-3,
+        median-of-1, the arithmetic mean, the geometric mean of odds and a
+        trimmed mean can each be scored against the published outcome. The
+        counterfactual DIFFERENCE in peer score is 100*ln(p'/p) for binary and
+        multiple choice, 50*ln(p'/p) for continuous - the field's geometric mean
+        cancels, so it never has to be reconstructed. Established by audit on
+        22 Sept 2026, correcting an earlier method of mine that held the field
+        term fixed and was biased by ~1.3 points a question at n=40.
+      - WHETHER THE STATUS QUO CHECK FIRES, and by how much it moves the number,
+        from the (f)/(g) pair carried on every binary sample.
+      - THE PARSE FAILURE RATE per question, by subtraction: a sample that fails
+        to parse never reaches this line, so expected-minus-logged is the count.
+        That matters because a forfeited question scores zero, which is ABOVE our
+        current average - so any median-of-1 reconstruction from these lines is
+        conditioned on survival and overstates it until that rate is applied as
+        a correction.
+
+    Logged rather than written to a file on purpose: Actions keeps the logs, the
+    workflow keeps no artefacts, and a file would need a new step and a
+    retention policy. One marker, one grep, one json.loads per line.
+    """
+    try:
+        logger.info("%s %s", TELEMETRY_MARKER, json.dumps(fields, default=str, sort_keys=True))
+    except Exception:  # telemetry must never cost a forecast
+        pass
+
+
+def _status_quo_pair(reasoning: str):
+    """Return (anchor, final) from a binary reasoning text, or (None, None).
+
+    The binary prompt asks for (f) the probability implied by the status quo
+    continuing and (g) the final probability, both as numbers. This reads them
+    back, so the fix can be measured rather than believed.
+
+    TELEMETRY ONLY, and wrapped: nothing downstream reads the return value, and
+    no forecast may ever be lost to a logging regex. Takes the LAST match for
+    each letter, like caps_for_reasoning - a model that restates the instruction
+    before answering it must not fool this.
+
+    Every backslash below is doubled in patch_phase1.py.
+    """
+    try:
+        def grab(letter):
+            found = re.findall(
+                r"^[ \t\r>#*_-]*\(" + letter + r"\)[^0-9\n]{0,100}?([0-9]+(?:\.[0-9]+)?)\s*%?",
+                reasoning or "",
+                re.MULTILINE,
+            )
+            return float(found[-1]) if found else None
+        return grab("f"), grab("g")
+    except Exception:
+        return None, None
 
 
 def _reject_mismatched_options(predicted_option_list, question) -> None:

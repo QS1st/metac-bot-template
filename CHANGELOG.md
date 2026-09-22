@@ -12,6 +12,72 @@ different bot.
 
 ---
 
+## 2026-09-22 (third) — one telemetry line per sample
+
+The season is being entered to **measure**, with several changes shipping
+together. A single season total cannot separate them. These lines can.
+
+Every successful sample now emits one greppable JSON object — `IBJ-TELEMETRY`
+followed by the payload — carrying the question id and URL, the question class,
+the sample's own value, the research length, and per path: the pre-cap value and
+the caps on binary, the `(f)`/`(g)` status-quo pair on binary, the full option
+vector on multiple choice, the declared percentiles on numeric and date, and the
+`FIGURE AMBIGUITY` flag on numeric.
+
+**What that makes computable after the season, for free:**
+
+*The aggregation rule.* Every sample value is recorded, so median-of-3,
+median-of-1, the arithmetic mean, the geometric mean of odds and a trimmed mean
+can each be scored against the published outcome. The counterfactual difference
+in peer score is `100 × ln(p′/p)` for binary and multiple choice and
+`50 × ln(p′/p)` for continuous — the field's geometric mean cancels, so it never
+has to be reconstructed.
+
+*Whether the status quo check fires,* and by how much it moves the number, from
+the `(f)`/`(g)` pair on every binary sample.
+
+*The parse failure rate,* by subtraction. A sample that fails never reaches the
+line, so expected-minus-logged is the count. That number is load-bearing: a
+forfeited question scores zero, which is **above** our −6.30 average, so any
+median-of-one reconstruction from these lines is conditioned on survival and
+overstates itself until the failure rate is applied as a correction.
+
+**Deliberately on the success path only, with no try/except around the parse.**
+The failure count falls out by subtraction without any exception handling to get
+wrong — and exception handling around a forecast is precisely where this project
+has hurt itself before. The date line omits the figure-ambiguity flag, because
+the date prompt never asks for it and a column of nulls would imply a question
+that was never put.
+
+### Three self-inflicted problems on the way, all caught before commit
+
+**The literal backslash-n, a fourth time.** The `json` import was written with
+`\n` escapes into a patch string, which is correct — the string is single-quoted
+and Python turns them into real newlines. I then "fixed" what wasn't broken,
+replaced them with actual newlines inside that quoted string, and left
+`patch_phase1.py` with a syntax error. Reverted. The lesson is narrower than the
+usual one: **check which quoting context a string lives in before deciding an
+escape is a bug.**
+
+**The anchor-overlap trap, a third time.** Three telemetry edits were written as
+new `replace` calls whose anchors sat *inside* earlier edits' replacement text —
+edits 3, 11 and 17. The build succeeded and the verbatim check failed, exactly as
+designed. They are now folded into those edits rather than layered on top.
+
+**A test that could not fail.** The first telemetry test lifted `_telemetry`
+without its `TELEMETRY_MARKER` constant, so the function raised `NameError`
+inside its own `except`, emitted nothing, and the assertion read an empty list.
+And the unserialisable-payload check passed `object()`, which `json`'s
+`default=str` absorbs — so a mutation turning the swallow into a re-raise
+survived. Both fixed; the payload is now a tuple-keyed dict, which genuinely
+defeats `json`.
+
+### Verification
+
+Build byte-identical from verified upstream, 39 edits, **376 checks pass**, and
+six fresh mutations of the telemetry each caught — including the two that
+survived the first sweep.
+
 ## 2026-09-22 (later) — the researcher was telling the forecaster the answer
 
 Two audits were asked to attack a pair of *decisions* rather than code — whether
