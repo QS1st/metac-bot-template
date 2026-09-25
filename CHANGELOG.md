@@ -12,6 +12,38 @@ different bot.
 
 ---
 
+## 2026-09-25 — setup hardening: Poetry pinned, one retry
+
+**No change to the bot's forecasting.** Workflow plumbing only.
+
+Run 1815 failed at 07:40 UTC in the `Install poetry` step — the installer
+reported *"Creating environment ... An error occurred"* — before any of our
+code ran. The next run was green. Run 1105 (16 Sept) failed in the same step.
+Two setup failures in ~1,830 runs, both transient, both costing a missed tick
+and a failure email that looks like a bot fault.
+
+* **Pinned** `snok/install-poetry` to commit `a783c322` and Poetry to `2.5.1`
+  in all five workflows that install it. Both are exactly what the live runs
+  already use (read from run 1834's log), so the happy path is unchanged; what
+  it removes is a new Poetry release or a moved `@v1` tag landing mid-season.
+  `poetry install --dry-run` under 2.5.1 against our `poetry.lock`: 136
+  installs, 0 updates, `forecasting-tools 0.2.92`. Not a full freeze — pip and
+  Poetry's own dependencies still float — and said so in the workflow.
+* **One retry** in the tournament workflow only: the first install is
+  `continue-on-error`, and on failure a 30-second wait and a second attempt
+  follow. The installer removes its partial environment on failure, so the
+  retry starts clean; if Poetry had installed and a later config line failed,
+  the retry re-runs that config and so smoke-tests the binary. If both fail,
+  the job fails exactly as before.
+* The failure explainer now names a double setup failure as such, instead of
+  listing `MODEL_TIER` and secrets as likely causes.
+
+Audited independently before shipping (actionlint clean; retry and
+expression semantics checked against the installer source and GitHub's
+`outcome`/`conclusion` docs). Parked for January: the explainer's "no summary
+yet" test cannot work, because `$GITHUB_STEP_SUMMARY` is per-step; and the
+install steps carry no step timeout.
+
 ## 2026-09-22 (sixth) — a way to find out before January
 
 **No change to the bot.** `benchmark_vs_cp.py` and the `Benchmark vs community
