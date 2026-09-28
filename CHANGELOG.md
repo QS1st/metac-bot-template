@@ -12,6 +12,27 @@ different bot.
 
 ---
 
+## 2026-09-28 — one retry on the dependency install
+
+**No change to the bot's forecasting.** Workflow plumbing only.
+
+Run 2197 failed at 11:42 UTC in `Install dependencies`: *"Unable to find
+installation candidates for forecasting-tools (0.2.92) ... 0 candidate(s) were
+identified"*. PyPI still lists 0.2.92, not yanked, and the next run was green —
+a PyPI blip, one step after the Poetry install that got its retry on the 25th.
+
+Same pattern: the first `poetry install` is `continue-on-error`; on failure, a
+30-second wait, an advisory clear of Poetry's PyPI HTTP cache, and a second
+install. `poetry install` is idempotent and resumes a half-built environment
+(tested locally by deleting forecasting-tools from a built venv: the retry
+reinstalled that one package). If the retry fails the job fails as before, and
+`Run bot` never runs on a partial install. The failure explainer names a double
+dependency failure as such.
+
+Audited independently before shipping. The audit corrected the stated reason
+for the cache clear: Poetry 2.5.1 does not cache error responses, so the wait
+and the second attempt are the fix and the clear is belt and braces.
+
 ## 2026-09-25 — setup hardening: Poetry pinned, one retry
 
 **No change to the bot's forecasting.** Workflow plumbing only.
