@@ -96,7 +96,29 @@ jobs:
       #     path: .venv
       #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
       - name: Install dependencies
+        id: deps_first
+        continue-on-error: true
         run: poetry install --no-interaction --no-root
+      # ONE RETRY, added 28 Sept 2026, same pattern as the Poetry install above.
+      # Run 2197 died here with "Unable to find installation candidates for
+      # forecasting-tools (0.2.92)" although PyPI still lists that release,
+      # unyanked; the log said "0 candidate(s) were identified", which is what
+      # Poetry 2.5.1 reports when PyPI's JSON endpoint answers anything but 200.
+      # The fix is the wait and the second attempt. Clearing Poetry's HTTP cache
+      # for PyPI ("PyPI" is case-sensitive) is belt and braces: error responses
+      # are not cached, so it only matters for a rare bad 200. It is advisory,
+      # so it cannot fail the retry on its own. poetry install is idempotent and
+      # resumes a half-built .venv. If the retry also fails the job fails exactly
+      # as before, and the bot never runs on a partial install.
+      - name: Wait before retrying the dependency install
+        if: steps.deps_first.outcome == 'failure'
+        run: sleep 30
+      - name: Install dependencies (retry)
+        id: deps_retry
+        if: steps.deps_first.outcome == 'failure'
+        run: |
+          poetry cache clear --all PyPI --no-interaction || echo "Cache clear failed; retrying the install anyway."
+          poetry install --no-interaction --no-root
       - name: Run bot
         run: |
           poetry run python main.py
@@ -158,6 +180,10 @@ jobs:
             echo "## SETUP FAILED: Poetry would not install, twice" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "The bot never started, so nothing was forecast and nothing was spent. Most likely a GitHub or PyPI blip rather than our code. If the next scheduled run is green, no action is needed. If every run fails here, a Poetry dependency has probably broken the install." >> "$GITHUB_STEP_SUMMARY"
+          elif [ ! -s "$GITHUB_STEP_SUMMARY" ] && [ "${{ steps.deps_retry.outcome }}" = "failure" ]; then
+            echo "## SETUP FAILED: dependencies would not install, twice" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The bot never started, so nothing was forecast and nothing was spent. Most likely a PyPI blip rather than our code. If the next scheduled run is green, no action is needed. If every run fails here, check that the locked forecasting-tools version is still on PyPI." >> "$GITHUB_STEP_SUMMARY"
           elif [ ! -s "$GITHUB_STEP_SUMMARY" ]; then
             echo "## CRASHED before writing a summary" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
