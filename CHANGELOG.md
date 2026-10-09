@@ -12,6 +12,42 @@ different bot.
 
 ---
 
+## 2026-10-09 — a dead man's switch, after a silent 14½-hour stop
+
+**No change to the bot's forecasting.** Workflow plumbing only.
+
+At 02:24 UTC on 9 Oct GitHub disabled Actions on this repository, a fork, with
+the notice *"GitHub disabled workflows on this forked repository because of its
+Actions usage."* No email was sent. Every dispatch from the Cloudflare trigger
+was refused with HTTP 422 "Actions has been disabled for this repository", and
+nothing ran until the owner re-enabled Actions at about 17:00 UTC.
+
+Two responses:
+
+* **Half the load.** The external trigger now fires every 20 minutes, not 10.
+  Questions stay open for roughly two and a half hours, so the bot still gets
+  six or seven attempts at each.
+* **A dead man's switch.** A new final step pings Healthchecks.io after every
+  successful run; Healthchecks emails the owner when pings stop (period 60
+  minutes, grace 60). It catches every silent failure seen so far — Actions
+  disabled, the trigger or its token failing, a GitHub outage, every run going
+  red — because they share one symptom: successful runs stop. It runs only on
+  success, can never fail the job (no secret means it skips; a failed ping only
+  logs a warning), and curl's retries are capped at 30 seconds. What it does
+  NOT prove is useful work: a run that exits green having forecast nothing
+  still pings.
+
+Audited independently before shipping. The audit moved the alert window from
+20/60 to 60/60 minutes so one timed-out run cannot raise a false alarm, and
+capped curl's retry wait.
+
+**And a test time-bomb defused.** Six checks of the no-season sentinel read
+the real clock, so from 30 Sept — when the sentinel's window closed exactly as
+designed — they failed on every run whatever the code did. They now run on a
+clock frozen inside the window; expiry itself was already tested separately on
+a frozen clock. Two deliberate breakages of the sentinel code (expiry moved
+early; sentinel disabled) are both caught. 451 checks pass.
+
 ## 2026-09-28 — one retry on the dependency install
 
 **No change to the bot's forecasting.** Workflow plumbing only.

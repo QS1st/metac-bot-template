@@ -696,14 +696,29 @@ def run():
         #
         # The sentinel must return NO id and NO problem: the seasonal half is
         # skipped, MiniBench still runs, and the workflow stays green.
-        for value in mods3.NO_SEASON_VALUES:
-            _os.environ["AIB_TOURNAMENT_ID"] = value
-            check(f"sentinel {value!r} skips the season without a problem",
-                  seasonal(), (None, None))
-        _os.environ["AIB_TOURNAMENT_ID"] = "NONE"
-        check("the sentinel is case-insensitive", seasonal(), (None, None))
-        _os.environ["AIB_TOURNAMENT_ID"] = "  Off  "
-        check("...and tolerates surrounding whitespace", seasonal(), (None, None))
+        #
+        # These checks describe the sentinel INSIDE its window, so they run on a
+        # frozen clock set inside it. Fixed 9 Oct 2026: they read the real clock,
+        # and from 30 Sept — when the window closed exactly as designed — all six
+        # failed on every run whatever the code did. A test of behaviour must not
+        # depend on today's date. Expiry itself is tested further down.
+        class _InWindowClock:
+            @staticmethod
+            def now(tz=None):
+                return _datetime(2026, 9, 27, 12, 0, tzinfo=_timezone.utc)
+        _clock_before_window_tests = mods3.datetime
+        mods3.datetime = _InWindowClock
+        try:
+            for value in mods3.NO_SEASON_VALUES:
+                _os.environ["AIB_TOURNAMENT_ID"] = value
+                check(f"sentinel {value!r} skips the season without a problem",
+                      seasonal(), (None, None))
+            _os.environ["AIB_TOURNAMENT_ID"] = "NONE"
+            check("the sentinel is case-insensitive", seasonal(), (None, None))
+            _os.environ["AIB_TOURNAMENT_ID"] = "  Off  "
+            check("...and tolerates surrounding whitespace", seasonal(), (None, None))
+        finally:
+            mods3.datetime = _clock_before_window_tests
 
         # The sentinel must not be reachable by accident. If a real tournament
         # id or slug ever collided with one of these, setting it would silently
