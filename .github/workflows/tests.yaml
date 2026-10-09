@@ -51,8 +51,19 @@ jobs:
         # patch_phase1.py asserts each edit matches exactly once, so this fails
         # loudly if the upstream template moves under us rather than silently
         # producing a different bot.
+        #
+        # PINNED 9 Oct 2026 to the upstream main.py the live bot is built from
+        # (commit a009159, 14 May 2026 — upstream's main.py did not change again
+        # until 1 Oct). On 1 Oct Metaculus synced main.py to FallTemplateBot2026
+        # and forecasting-tools 0.3.0; tracking HEAD then turned this check red
+        # on every push although the bot itself was untouched. Adopting the new
+        # template is a deliberate January job, not something CI should force
+        # mid-season. A raw file by commit SHA is immutable.
         run: |
-          git clone --depth 1 https://github.com/Metaculus/metac-bot-template.git /tmp/upstream
+          UPSTREAM_SHA=a0091598edb43d0682e144bca8b30106cd8ca99e
+          mkdir -p /tmp/upstream
+          curl -fsSL --retry 3 -o /tmp/upstream/main.py \
+            "https://raw.githubusercontent.com/Metaculus/metac-bot-template/${UPSTREAM_SHA}/main.py"
           python patch_phase1.py /tmp/upstream/main.py /tmp/rebuilt.py
           python -m py_compile /tmp/rebuilt.py
 
