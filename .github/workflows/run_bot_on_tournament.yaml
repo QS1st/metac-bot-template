@@ -167,6 +167,32 @@ jobs:
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
 
+      # DEAD MAN'S SWITCH, added 9 Oct 2026. On 9 Oct GitHub disabled Actions on
+      # this fork "because of its Actions usage", sent no email, and the bot was
+      # silently off for 14.5 hours until Iain noticed. Every failure we have had
+      # that did NOT email anyone shares one symptom: successful runs stop. So a
+      # successful run pings Healthchecks.io, and Healthchecks emails Iain when
+      # the pings stop — whatever the cause (Actions disabled, Worker or token
+      # broken, GitHub outage, every run going red). It does NOT prove useful
+      # work: a run that exits green having forecast nothing still pings.
+      # Healthchecks check set to period 60 min, grace 60 min: one timed-out or
+      # setup-failed run is absorbed; a real stoppage emails within ~2 hours.
+      # Runs only on success, so a red run is never reported as alive. It can
+      # never fail the job: no secret means it skips, a failed ping only logs.
+      # The worst case of a broken ping is a false alarm, never a missed one.
+      - name: Tell Healthchecks.io the bot is alive
+        if: success()
+        env:
+          HC_PING_URL: ${{ secrets.HC_PING_URL }}
+        run: |
+          if [ -z "$HC_PING_URL" ]; then
+            echo "HC_PING_URL secret not set; skipping the alive ping."
+          elif curl -fsS -m 10 --retry 3 --retry-connrefused --retry-max-time 30 -o /dev/null "$HC_PING_URL"; then
+            echo "Alive ping sent to Healthchecks.io."
+          else
+            echo "::warning title=Healthchecks ping failed::The bot ran fine but the alive ping did not get through. Expect a false alarm email if this keeps happening."
+          fi
+
       # main.py writes its own verdict to the run page, but only if it reaches
       # the end. A crash — a bad MODEL_TIER, an API error, a dependency
       # failure — dies before that and leaves the run page blank, so the only
